@@ -1,0 +1,300 @@
+"""Kho ảnh (gallery) — truy vấn ảnh đơn hàng đã persisted trong 10 ngày gần nhất.
+
+Ánh xạ legacy ``getAllImagesLast10Days`` (Code.gs): nguồn là các ảnh của
+``tbl_DonHang``, lọc theo ngày tạo đơn trong cửa sổ [hôm nay - days, hôm nay],
+bỏ đơn đã xóa, gom theo ngày ``dd/MM/yyyy``. Trong hệ mới nguồn là
+``media_objects`` liên kết qua ``order_media`` tới ``orders``.
+"""
+
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, aliased
+
+from ..core.errors import ApiError
+from ..core.text import fold
+from ..models import Customer, Invoice, InvoiceOrder, MediaObject, Order, OrderGroup, OrderMedia, User
+from .storage import media_view_url
+
+TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+
+GALLERY_STATUS_BY_ORDER_STATUS = {
+    "NEW": "NOT_PICKED",
+    "PICKING": "PICKING",
+    "PICKED": "PICKED",
+    "DEBT_ORDER": "PICKED",
+    "SHIPPING": "SENT",
+    "COMPLETED": "SENT",
+    "CANCELLED": "CANCELLED",
+    "RETURNED": "SENT",
+}
+GALLERY_STATUS_PRIORITY = ("SENT", "PICKED", "PICKING", "NOT_PICKED", "CANCELLED")
+
+
+def recent_images(
+    db: Session, *, days: int = 10, sort: str = "desc", limit: int = 300, offset: int = 0
+) -> tuple[list[dict], dict]:
+    """Trả về danh sách ảnh gom theo ngày và meta phân trang.
+
+    ``days`` là số ngày lịch trừ lùi tính từ hôm nay (giống legacy:
+    ``today - days`` làm cận dưới, ngày hôm nay là cận trên).
+    """
+    days = max(1, min(int(days), 365))
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+
+    today = datetime.now(TZ).date()
+    cutoff = today - timedelta(days=days)
+
+    stmt = (
+        select(MediaObject, Order, Customer.name)
+        .join(OrderMedia, OrderMedia.media_id == MediaObject.id)
+        .join(Order, Order.id == OrderMedia.order_id)
+        .join(Customer, Customer.id == Order.customer_id)
+        .where(MediaObject.status == "READY")
+        .where(Order.status != "DELETED")
+        .where(Order.created_date >= cutoff)
+        .where(Order.created_date <= today)
+    )
+    rows = db.execute(stmt).all()
+
+    # Dedup theo media_id: đơn "Tân Xuân và Cá Koi" sinh 2 order con cùng tham
+    # chiếu một bộ ảnh, không được hiện một file hai lần.
+    seen: set[uuid.UUID] = set()
+    flat: list[dict] = []
+    for media, order, customer_name in rows:
+        if media.id in seen:
+            continue
+        seen.add(media.id)
+        flat.append({
+            "id": str(media.id),
+            "order_id": str(order.id),
+            "order_no": order.order_no,
+            "customer_id": str(order.customer_id),
+            "customer_name": customer_name,
+            "order_date": order.created_date.isoformat(),
+            "created_at": media.created_at.isoformat() if media.created_at else None,
+            "url": media_view_url(media.id),
+        })
+
+    # Sort theo ngày thật (không sort chuỗi dd/MM/yyyy).
+    flat.sort(key=lambda x: (x["order_date"], x["created_at"] or ""), reverse=(sort != "asc"))
+
+    total = len(flat)
+    page = flat[offset:offset + limit]
+
+    # Gom theo ngày, giữ nguyên thứ tự đã sort.
+    grouped: dict[str, list[dict]] = {}
+    for item in page:
+        y, m, d = item["order_date"].split("-")
+        label = f"{d}/{m}/{y}"
+        grouped.setdefault(label, []).append(item)
+
+    data = [
+        {"date": label, "date_iso": items[0]["order_date"], "images": items}
+        for label, items in grouped.items()
+    ]
+    meta = {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": offset + limit if offset + limit < total else None,
+    }
+    return data, meta
+
+
+def _gallery_datetime_key(value: datetime | None) -> float:
+    if value is None:
+        return float("-inf")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
+def customer_order_gallery(
+    db: Session,
+    *,
+    days: int = 10,
+    sort: str = "created_desc",
+    q: str | None = None,
+    date_filter: date | None = None,
+    status: str | None = None,
+    limit: int = 500,
+    offset: int = 0,
+) -> tuple[list[dict], dict]:
+    """Return persisted customer-order images grouped once per order/group."""
+    days = max(1, min(int(days), 365))
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    today = datetime.now(TZ).date()
+    cutoff = today - timedelta(days=days)
+    if status and status not in set(GALLERY_STATUS_BY_ORDER_STATUS.values()):
+        raise ApiError(422, "INVALID_GALLERY_STATUS", "Trạng thái lọc Kho ảnh không hợp lệ.")
+
+    creator = aliased(User)
+    uploader = aliased(User)
+    stmt = (
+        select(MediaObject, Order, Customer, OrderGroup, creator.display_name, uploader.display_name)
+        .join(OrderMedia, OrderMedia.media_id == MediaObject.id)
+        .join(Order, Order.id == OrderMedia.order_id)
+        .join(Customer, Customer.id == Order.customer_id)
+        .outerjoin(OrderGroup, OrderGroup.id == Order.order_group_id)
+        .outerjoin(creator, creator.id == Order.created_by)
+        .outerjoin(uploader, uploader.id == MediaObject.uploaded_by)
+        .where(
+            MediaObject.status == "READY",
+            Order.status != "DELETED",
+            Order.created_date >= cutoff,
+            Order.created_date <= today,
+        )
+    )
+    if date_filter:
+        stmt = stmt.where(Order.created_date == date_filter)
+
+    grouped: dict[tuple[str, str], dict] = {}
+    for media, order, customer, order_group, creator_name, uploader_name in db.execute(stmt).all():
+        group_key = ("group", str(order.order_group_id)) if order.order_group_id else ("order", str(order.id))
+        order_date = order.created_date
+        card = grouped.get(group_key)
+        if card is None:
+            card = {
+                "group_id": str(order.order_group_id or order.id),
+                "customer_id": str(customer.id),
+                "customer_name": customer.name,
+                "customer_code": customer.customer_code,
+                "group_no": order_group.group_no if order_group else None,
+                "date": order_date,
+                "created_at": order_group.created_at if order_group else order.created_at,
+                "notes": set(),
+                "creators": set(),
+                "orders": {},
+                "images": {},
+            }
+            grouped[group_key] = card
+        if order_date > card["date"]:
+            card["date"] = order_date
+        if order.customer_note:
+            card["notes"].add(order.customer_note)
+        if creator_name:
+            card["creators"].add(creator_name)
+        card["orders"][str(order.id)] = {
+            "id": str(order.id),
+            "order_no": order.order_no,
+            "status": order.status,
+            "created_at": order.created_at,
+        }
+        card["images"].setdefault(str(media.id), {
+            "id": str(media.id),
+            "url": media_view_url(media.id),
+            "original_name": media.original_name,
+            "created_at": media.created_at.isoformat() if media.created_at else None,
+            "uploaded_by_name": uploader_name,
+        })
+
+    query = fold(q)
+    order_ids = [uuid.UUID(order_id) for card in grouped.values() for order_id in card["orders"]]
+    invoice_numbers_by_order: dict[str, set[str]] = {}
+    if order_ids:
+        invoice_rows = db.execute(
+            select(InvoiceOrder.order_id, Invoice.invoice_no)
+            .join(Invoice, Invoice.id == InvoiceOrder.invoice_id)
+            .where(InvoiceOrder.order_id.in_(order_ids))
+        ).all()
+        for order_id, invoice_no in invoice_rows:
+            invoice_numbers_by_order.setdefault(str(order_id), set()).add(invoice_no)
+
+    cards = []
+    for card in grouped.values():
+        order_rows = list(card["orders"].values())
+        status_values = {
+            GALLERY_STATUS_BY_ORDER_STATUS[row["status"]]
+            for row in order_rows
+            if row["status"] in GALLERY_STATUS_BY_ORDER_STATUS
+        }
+        gallery_status = next(
+            (candidate for candidate in GALLERY_STATUS_PRIORITY if candidate in status_values),
+            "NOT_PICKED",
+        )
+        images = list(card["images"].values())
+        order_numbers = sorted(row["order_no"] for row in order_rows)
+        invoice_numbers = sorted({
+            invoice_no
+            for row in order_rows
+            for invoice_no in invoice_numbers_by_order.get(row["id"], set())
+        })
+        created_at = card["created_at"] or min(
+            (row["created_at"] for row in order_rows if row["created_at"]),
+            key=_gallery_datetime_key,
+            default=None,
+        )
+        created_by_names = sorted(card["creators"])
+        note = " · ".join(sorted(card["notes"]))
+        date_iso = card["date"].isoformat()
+        searchable = fold(" ".join([
+            card["customer_name"],
+            card["customer_code"],
+            card["group_no"] or "",
+            " ".join(order_numbers),
+            " ".join(invoice_numbers),
+            note,
+            " ".join(created_by_names),
+            " ".join(image["uploaded_by_name"] or "" for image in images),
+            date_iso,
+            card["date"].strftime("%d/%m/%Y"),
+        ]))
+        if query and query not in searchable:
+            continue
+        if status and gallery_status != status:
+            continue
+        orders = sorted(order_rows, key=lambda row: row["order_no"])
+        cards.append({
+            "group_id": card["group_id"],
+            "order_id": orders[0]["id"],
+            "order_ids": [row["id"] for row in orders],
+            "order_no": ", ".join(order_numbers),
+            "order_numbers": order_numbers,
+            "invoice_numbers": invoice_numbers,
+            "customer_id": card["customer_id"],
+            "customer_name": card["customer_name"],
+            "customer_code": card["customer_code"],
+            "created_at": created_at.isoformat() if created_at else None,
+            "order_date": date_iso,
+            "note": note,
+            "status": gallery_status,
+            "created_by_names": created_by_names,
+            "image_count": len(images),
+            "images": images,
+        })
+
+    cards.sort(
+        key=lambda row: (_gallery_datetime_key(
+            datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
+        ), row["order_no"]),
+        reverse=(sort == "created_desc"),
+    )
+    summary = {
+        "orders_with_images": len(cards),
+        "total_images": sum(card["image_count"] for card in cards),
+    }
+    total = len(cards)
+    page = cards[offset:offset + limit]
+    by_date: dict[str, list[dict]] = {}
+    for card in page:
+        by_date.setdefault(card["order_date"], []).append(card)
+    data = [
+        {
+            "date": datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y"),
+            "date_iso": date_iso,
+            "orders": orders,
+        }
+        for date_iso, orders in by_date.items()
+    ]
+    return data, {
+        "summary": summary,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": offset + limit if offset + limit < total else None,
+    }
