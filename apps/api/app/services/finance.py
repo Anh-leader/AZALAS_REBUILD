@@ -139,7 +139,7 @@ def preview_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid
         order_rows.append({
             "id": str(order.id), "order_no": order.order_no, "amount": amount,
             "status": order.status, "billing_status": order.billing_status,
-            "images": [{"id": str(m.id), "url": media_view_url(m.id), "original_name": m.original_name}
+            "images": [{"id": str(m.id), "url": media_view_url(m.id), "view_url": media_view_url(m.id), "original_name": m.original_name}
                        for m in order.media],
             "items": [{
                 "id": str(item.id), "product_variant_id": str(item.product_variant_id) if item.product_variant_id else None,
@@ -178,7 +178,7 @@ def _invoice_dict(invoice: Invoice, db: Session) -> dict:
         media = db.get(MediaObject, invoice.captured_invoice_media_id)
         if media:
             captured_image = {
-                "id": str(media.id), "url": media_view_url(media.id),
+                "id": str(media.id), "url": media_view_url(media.id), "view_url": media_view_url(media.id),
                 "original_name": media.original_name, "content_type": media.content_type,
             }
     return {
@@ -735,7 +735,7 @@ def capture_invoice_image(db: Session, *, customer_id: uuid.UUID, order_ids: lis
     db.commit()
     return {
         "id": str(capture.id), "media_id": str(media_id),
-        "url": media_view_url(media_id), "original_name": media.original_name,
+        "url": media_view_url(media_id), "view_url": media_view_url(media_id), "original_name": media.original_name,
         "content_type": media.content_type,
     }
 
@@ -762,7 +762,7 @@ def get_invoice_capture(db: Session, *, customer_id: uuid.UUID, order_ids: list[
         raise ApiError(404, "MEDIA_NOT_FOUND", "Không tìm thấy ảnh hóa đơn đã chụp.")
     return {
         "id": str(capture.id), "media_id": str(media.id),
-        "url": media_view_url(media.id), "original_name": media.original_name,
+        "url": media_view_url(media.id), "view_url": media_view_url(media.id), "original_name": media.original_name,
         "content_type": media.content_type,
     }
 

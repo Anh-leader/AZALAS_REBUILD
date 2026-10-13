@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, STATUS_LABEL, type Customer, type CustomerDebtChange, type Order, type Overview, type QueueSection, type QueueTab } from './api/client'
+import { api, ApiError, STATUS_LABEL, type Customer, type CustomerDebtChange, type Order, type Overview, type QueueSection, type QueueTab, type User } from './api/client'
+import { uploadMediaFile } from './api/media'
 import { useAuth } from './api/auth'
 import { formatDate, formatDateShort, formatMoney, parseMoneyInput, todayIso, todayLabel } from './lib/format'
 import { PickWorkspace } from './components/PickWorkspace'
@@ -16,7 +17,7 @@ import { HrPage, ReportsPage } from './components/HrReportsPages'
 import { AccountPage, AdminPage } from './components/AdminPage'
 import type { DebtStatement } from './api/client'
 
-type Page = 'dashboard' | 'orders' | 'create' | 'shipping' | 'invoices' | 'returns' | 'images' | 'customers' | 'production' | 'materials' | 'hr' | 'reports' | 'admin' | 'account'
+export type Page = 'dashboard' | 'orders' | 'create' | 'shipping' | 'invoices' | 'returns' | 'images' | 'customers' | 'production' | 'materials' | 'hr' | 'reports' | 'admin' | 'account'
 type NavItem = [Page, string, string, string]
 const navSections: Array<[string, NavItem[]]> = [
   ['Bán hàng', [['dashboard', 'bi-grid-1x2-fill', 'Tổng quan', 'sales.view'], ['create', 'bi-plus-circle-fill', 'Tạo đơn', 'sales.create'], ['orders', 'bi-card-checklist', 'Chi tiết đơn', 'sales.view'], ['shipping', 'bi-truck', 'Vận chuyển', 'sales.ship'], ['invoices', 'bi-receipt', 'Hóa đơn', 'sales.invoice'], ['returns', 'bi-arrow-return-left', 'Hàng trả', 'sales.returns'], ['images', 'bi-images', 'Kho ảnh', 'sales.view'], ['customers', 'bi-people-fill', 'Khách hàng / công nợ', 'sales.view']]],
@@ -33,14 +34,7 @@ export function App() {
   const [page, setPage] = useState<Page>('dashboard')
   if (loading) return <div className="splash">Đang khởi động AZALAS SPORT…</div>
   if (!user) return <Login />
-  return <div>
-    <aside className="pc-kiot-sidebar">
-      <div className="pc-kiot-brand"><img src="/logo.svg"/><div><div className="pc-kiot-brand-title">AZALAS SPORT</div><div className="pc-kiot-brand-sub">QUẢN TRỊ VẬN HÀNH</div></div></div>
-      <nav className="pc-kiot-nav">{navSections.map(([section, items]) => { const visible = items.filter(item => user.permissions.includes(item[3])); return visible.length ? <div key={section}><div className="pc-kiot-nav-title">{section}</div>{visible.map(([id, icon, label]) => <button key={id} className={`pc-kiot-link ${page === id ? 'active' : ''}`} onClick={() => setPage(id)}><i className={`bi ${icon}`}/>{label}</button>)}</div> : null })}</nav>
-      <div className="pc-kiot-foot"><i className="bi bi-person-circle"/><span><b>{user.display_name}</b><br/>{user.role}</span><button onClick={() => setPage('account')}>Đổi MK</button><button onClick={logout}>Thoát</button></div>
-    </aside>
-    <main className="app-container">
-      <header className="blue-header"><span><i className="bi bi-calendar3"/> {todayLabel()}</span><span className="title">AZALAS SPORT</span><span>{user.display_name}</span></header>
+  return <AppShell user={user} page={page} setPage={setPage} logout={logout}>
       {page === 'dashboard' && <Dashboard go={setPage}/>} {page === 'orders' && <Orders/>}
       {page === 'create' && <CreateOrder onCreated={() => setPage('orders')}/>} {page === 'shipping' && <ShippingPage/>}
       {page === 'invoices' && <InvoicePage go={setPage}/>} {page === 'returns' && <ReturnsPage/>} {page === 'images' && <RecentImagesPage go={setPage}/>} {page === 'customers' && <Customers/>}
@@ -49,6 +43,66 @@ export function App() {
       {page === 'hr' && <HrPage/>} {page === 'reports' && <ReportsPage onBack={() => setPage('dashboard')} onOpenOrders={() => setPage('orders')}/>}
       {page === 'admin' && <AdminPage/>}
       {page === 'account' && <AccountPage/>}
+  </AppShell>
+}
+
+export function AppShell({
+  user,
+  page,
+  setPage,
+  logout,
+  children,
+}: {
+  user: User
+  page: Page
+  setPage: (page: Page) => void
+  logout: () => void
+  children?: ReactNode
+}) {
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  useEffect(() => {
+    if (!sidebarOpen) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSidebarOpen(false)
+    }
+    const onResize = () => {
+      if (window.innerWidth >= 1024) setSidebarOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('resize', onResize)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [sidebarOpen])
+
+  useEffect(() => {
+    setSidebarOpen(false)
+  }, [page])
+
+  return <div className="app-shell">
+    {sidebarOpen && <button className="pc-kiot-overlay" aria-label="Đóng menu" onClick={() => setSidebarOpen(false)}/>}
+    <aside className={`pc-kiot-sidebar${sidebarOpen ? ' is-open' : ''}`}>
+      <div className="pc-kiot-brand">
+        <img src="/logo.svg" alt="AZALAS"/>
+        <div><div className="pc-kiot-brand-title">AZALAS SPORT</div><div className="pc-kiot-brand-sub">QUẢN TRỊ VẬN HÀNH</div></div>
+        <button className="pc-kiot-close" aria-label="Đóng menu" onClick={() => setSidebarOpen(false)}><i className="bi bi-x-lg"/></button>
+      </div>
+      <nav className="pc-kiot-nav" aria-label="Chức năng chính">{navSections.map(([section, items]) => { const visible = items.filter(item => user.permissions.includes(item[3])); return visible.length ? <div key={section}><div className="pc-kiot-nav-title">{section}</div>{visible.map(([id, icon, label]) => <button key={id} className={`pc-kiot-link ${page === id ? 'active' : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => { setPage(id); setSidebarOpen(false) }}><i className={`bi ${icon}`}/>{label}</button>)}</div> : null })}</nav>
+      <div className="pc-kiot-foot"><i className="bi bi-person-circle"/><span><b>{user.display_name}</b><br/>{user.role}</span><button onClick={() => { setPage('account'); setSidebarOpen(false) }}>Đổi MK</button><button onClick={logout}>Thoát</button></div>
+    </aside>
+    <main className="app-container">
+      <header className="blue-header">
+        <button className="pc-kiot-menu-toggle" aria-label="Mở menu" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}><i className="bi bi-list"/></button>
+        <span className="blue-header-date"><i className="bi bi-calendar3"/> {todayLabel()}</span>
+        <span className="title">AZALAS SPORT</span>
+        <span className="blue-header-user">{user.display_name}</span>
+      </header>
+      {children}
     </main>
   </div>
 }
@@ -321,10 +375,9 @@ function CreateOrder({ onCreated }: { onCreated: () => void }) {
             if (row.uploads[index].mediaId) continue
             row.uploads[index] = { ...row.uploads[index], uploading: true, error: undefined }
             setMultiRows([...completedRows])
-            const form = new FormData(); form.append('file', row.uploads[index].file)
             try {
-              const response = await api<{id: string}>('/media/upload', { method: 'POST', body: form })
-              row.uploads[index] = { ...row.uploads[index], mediaId: response.data.id, uploading: false }
+              const response = await uploadMediaFile(row.uploads[index].file, 'orders')
+              row.uploads[index] = { ...row.uploads[index], mediaId: response.id, uploading: false }
               setMultiRows([...completedRows])
             } catch (uploadError) {
               uploadFailed = true
@@ -362,10 +415,9 @@ function CreateOrder({ onCreated }: { onCreated: () => void }) {
       for (let index = 0; index < completed.length; index += 1) {
         if (completed[index].mediaId) continue
         completed[index] = { ...completed[index], uploading: true, error: undefined }; setUploads([...completed])
-        const form = new FormData(); form.append('file', completed[index].file)
         try {
-          const response = await api<{id: string}>('/media/upload', { method: 'POST', body: form })
-          completed[index] = { ...completed[index], mediaId: response.data.id, uploading: false }
+          const response = await uploadMediaFile(completed[index].file, 'orders')
+          completed[index] = { ...completed[index], mediaId: response.id, uploading: false }
           setUploads([...completed])
         } catch (uploadError) {
           uploadFailed = true

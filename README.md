@@ -105,7 +105,7 @@ Hủy hóa đơn/phiếu đã post tạo các dòng reversal; hệ thống khôn
 
 ## Lưu file
 
-Mặc định local lưu ảnh ở `apps/api/uploads`. Để dùng S3 private, đặt `S3_BUCKET` (và tùy chọn `S3_REGION`) trong `.env`; database chỉ ghi `bucket`, `object_key`, `version_id` và metadata. API phát sinh presigned URL 5 phút khi đọc, không lưu URL ký trong database.
+Dev mặc định lưu ảnh tại `apps/api/uploads` với `STORAGE_DRIVER=local`. Production dùng Cloudflare R2 bằng cách cấu hình `STORAGE_DRIVER=r2` cùng các biến `R2_*`; database chỉ lưu metadata và object key, không lưu base64 hoặc URL ký. API kiểm tra quyền trước khi cấp URL xem ngắn hạn. Xem hướng dẫn chi tiết tại [docs/CLOUDFLARE_R2_SETUP.md](./docs/CLOUDFLARE_R2_SETUP.md).
 
 ## Database hiện có
 

@@ -362,7 +362,13 @@ def order_to_dict(o: Order) -> dict:
         "invoice_balance_amount": o.invoice_balance_amount,
         "version": o.version,
         "created_at": o.created_at.isoformat() if o.created_at else None,
-        "images": [{"id": str(m.id), "original_name": m.original_name, "content_type": m.content_type, "url": media_view_url(m.id)} for m in o.media],
+        "images": [{
+            "id": str(m.id),
+            "original_name": m.original_name,
+            "content_type": m.content_type,
+            "url": media_view_url(m.id),
+            "view_url": media_view_url(m.id),
+        } for m in o.media],
     }
 
 

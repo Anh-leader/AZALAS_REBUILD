@@ -775,6 +775,7 @@ class MediaObject(Base):
 
     __tablename__ = "media_objects"
     id: Mapped[uuid.UUID] = uid()
+    storage_provider: Mapped[str] = mapped_column(String(20), default="local", server_default="local")
     storage: Mapped[str] = mapped_column(String(20), default="LOCAL")
     bucket: Mapped[str | None] = mapped_column(String(255))
     object_key: Mapped[str] = mapped_column(Text)
@@ -782,6 +783,7 @@ class MediaObject(Base):
     original_name: Mapped[str | None] = mapped_column(Text)
     content_type: Mapped[str] = mapped_column(String(100))
     size_bytes: Mapped[int] = mapped_column(BigInteger)
+    checksum: Mapped[str] = mapped_column(String(64), default="")
     sha256: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), default="READY")
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))

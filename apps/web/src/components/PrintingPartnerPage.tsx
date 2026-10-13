@@ -1,6 +1,7 @@
 import { useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type PrintingPartnerDebtMonth, type PrintingPartnerDebtSummary, type PrintingPartnerLedgerRow, type PrintingPartnerMonthPayment, type PrintingPartnerSettlement } from '../api/client'
+import { openAuthenticatedMedia } from '../api/media'
 import { formatDate, formatMoney, todayIso } from '../lib/format'
 
 type Tab = 'settle' | 'debt'
@@ -74,7 +75,7 @@ function SettleTab({ partner }: { partner: PrintingPartnerKey }) {
       <button className="btn-main" disabled={busy}>{busy ? 'ĐANG LƯU…' : `CHỐT THÁNG ${label}`}</button>
     </form>
     <h3 className="section-title">Đã chốt gần đây</h3>
-    {settlements.data?.length ? <div className="zipper-catalog">{settlements.data.map(row => <div className="compact-row" key={row.id}><span><b>{row.period_month}</b><small>{row.settlement_no}{row.media && <> · <a href={row.media.url} target="_blank" rel="noreferrer">{row.media.original_name || 'Xem file PDF'}</a></>}</small></span><strong>{formatMoney(row.total_amount)}</strong><small>{row.status === 'UNPAID' ? 'Còn nợ' : row.status}</small></div>)}</div> : <div className="empty">Chưa có chốt {label} nào.</div>}
+    {settlements.data?.length ? <div className="zipper-catalog">{settlements.data.map(row => <div className="compact-row" key={row.id}><span><b>{row.period_month}</b><small>{row.settlement_no}{row.media && <> · <AuthenticatedFileLink url={row.media.url} label={row.media.original_name || 'Xem file PDF'}/></>}</small></span><strong>{formatMoney(row.total_amount)}</strong><small>{row.status === 'UNPAID' ? 'Còn nợ' : row.status}</small></div>)}</div> : <div className="empty">Chưa có chốt {label} nào.</div>}
   </div>
 }
 
@@ -151,10 +152,22 @@ function SettleDetail({ partner, month }: { partner: PrintingPartnerKey; month: 
   const total = settlements.data.reduce((sum, r) => sum + r.total_amount, 0)
   return <div className="card-inner"><b>Chi tiết chốt tháng · {monthLabel(month)}</b>
     <div className="zipper-detail-table"><div className="zipper-detail-head"><span>Ngày chốt</span><span>Số tiền</span><span>Ghi chú</span><span>File</span><span>Người nhập</span></div>
-      {settlements.data.map(row => <div className="zipper-detail-row" key={row.id}><span>{row.created_at ? formatDate(row.created_at) : row.settlement_no}</span><strong>{formatMoney(row.total_amount)}</strong><span>{row.notes || '—'}</span><span>{row.media ? <a href={row.media.url} target="_blank" rel="noreferrer">{row.media.original_name || 'Xem file'}</a> : '—'}</span><span>{row.created_by_name || '—'}</span></div>)}
+      {settlements.data.map(row => <div className="zipper-detail-row" key={row.id}><span>{row.created_at ? formatDate(row.created_at) : row.settlement_no}</span><strong>{formatMoney(row.total_amount)}</strong><span>{row.notes || '—'}</span><span>{row.media ? <AuthenticatedFileLink url={row.media.url} label={row.media.original_name || 'Xem file'}/> : '—'}</span><span>{row.created_by_name || '—'}</span></div>)}
     </div>
     <div className="zipper-total">Tổng chốt tháng: <strong>{formatMoney(total)}</strong></div>
   </div>
+}
+
+function AuthenticatedFileLink({ url, label }: { url: string; label: string }) {
+  const [error, setError] = useState('')
+  return <span>
+    <a href={url} onClick={event => {
+      event.preventDefault()
+      setError('')
+      void openAuthenticatedMedia(url).catch(() => setError('Không thể mở file.'))
+    }}>{label}</a>
+    {error && <small className="error-text">{error}</small>}
+  </span>
 }
 
 function PaymentDetail({ partner, month }: { partner: PrintingPartnerKey; month: string }) {

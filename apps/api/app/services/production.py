@@ -189,7 +189,7 @@ def get_or_create_color(db: Session, name: str) -> Color:
 
 
 def _media_dict(media: MediaObject) -> dict:
-    return {"id": str(media.id), "url": media_view_url(media.id),
+    return {"id": str(media.id), "url": media_view_url(media.id), "view_url": media_view_url(media.id),
             "original_name": media.original_name, "content_type": media.content_type}
 
 

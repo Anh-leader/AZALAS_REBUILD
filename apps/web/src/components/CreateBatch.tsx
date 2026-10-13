@@ -1,6 +1,7 @@
 import { useMemo, useState, type ChangeEvent, type ClipboardEvent, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Customer, type ProductionBatch, type ProductionMaster } from '../api/client'
+import { uploadMediaFile } from '../api/media'
 import { formatMoney, todayIso } from '../lib/format'
 import { normalizeSize, parseColorLayers, parseQuantityExpression, SIZE_ORDER, type ColorLayers } from '../lib/rpParse'
 
@@ -146,10 +147,9 @@ export function CreateBatch({ master, onCreated, initialMode }: { master: Produc
       for (let index = 0; index < completed.length; index += 1) {
         if (completed[index].mediaId) continue
         completed[index] = { ...completed[index], uploading: true }; setUploads([...completed])
-        const fd = new FormData(); fd.append('file', completed[index].file)
         try {
-          const response = await api<{ id: string }>('/media/upload', { method: 'POST', body: fd })
-          completed[index] = { ...completed[index], mediaId: response.data.id, uploading: false }; setUploads([...completed])
+          const response = await uploadMediaFile(completed[index].file, 'production')
+          completed[index] = { ...completed[index], mediaId: response.id, uploading: false }; setUploads([...completed])
         } catch (caught) {
           completed[index] = { ...completed[index], uploading: false, error: message(caught) }
           setUploads([...completed]); throw caught

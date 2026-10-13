@@ -1,0 +1,11 @@
+services:
+  frontend:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    image: azalas-frontend:production
+    environment:
+      API_UPSTREAM: ${API_UPSTREAM:?Set API_UPSTREAM to the backend URL reachable from the frontend container}
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    restart: unless-stopped

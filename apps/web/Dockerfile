@@ -1,17 +1,16 @@
-FROM node:22-alpine
+FROM node:22-alpine AS build
 
 WORKDIR /app
 
-COPY package*.json ./
-
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 COPY . .
-
 RUN npm run build
 
-ENV NODE_ENV=production
+FROM nginx:stable-alpine
 
-EXPOSE 3000
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY --from=build /app/dist /usr/share/nginx/html
 
-CMD ["node", "server.cjs"]
+EXPOSE 80

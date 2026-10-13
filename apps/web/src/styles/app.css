@@ -27,6 +27,7 @@
 
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; min-height: 100%; }
+body { overflow-x: hidden; }
 body {
   font-family: 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   background: radial-gradient(circle at 85% 90%, #e3f1f4 0%, transparent 45%), var(--pc-bg);
@@ -44,6 +45,7 @@ a { color: inherit; text-decoration: none; }
   color: #e5edf7; z-index: 900; display: flex; flex-direction: column;
   box-shadow: 8px 0 24px rgba(15, 23, 42, 0.18);
 }
+.pc-kiot-overlay, .pc-kiot-close, .pc-kiot-menu-toggle { display: none; }
 .pc-kiot-brand {
   min-height: 76px; display: flex; align-items: center; gap: 12px; padding: 14px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -76,7 +78,7 @@ a { color: inherit; text-decoration: none; }
 .pc-kiot-foot b { color: #fff; }
 .pc-kiot-foot button { margin-left: auto; background: rgba(255,255,255,.08); color: #e5edf7; border: none; border-radius: 8px; padding: 6px 10px; font-weight: 700; font-size: 12px; }
 
-.app-container { margin-left: var(--pc-sidebar-w); min-height: 100vh; padding-bottom: 40px; }
+.app-container { min-width: 0; margin-left: var(--pc-sidebar-w); min-height: 100vh; padding-bottom: 40px; }
 
 /* ---------- Header (blue bar) ---------- */
 .blue-header {
@@ -154,9 +156,36 @@ textarea.form-control { min-height: 60px; resize: vertical; }
 .empty { text-align: center; color: var(--text-muted); padding: 30px 10px; font-weight: 600; }
 .loading { text-align: center; color: var(--primary); padding: 30px; font-weight: 600; }
 
-@media (max-width: 991px) {
-  .pc-kiot-sidebar { display: none; }
-  .app-container { margin-left: 0; }
+@media (max-width: 1023px) {
+  .pc-kiot-sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 1300; width: min(300px, 85vw); max-width: 85vw;
+    transform: translateX(-100%); visibility: hidden; transition: transform .24s ease, visibility 0s linear .24s;
+  }
+  .pc-kiot-sidebar.is-open { transform: translateX(0); visibility: visible; transition: transform .24s ease; }
+  .pc-kiot-overlay {
+    display: block; position: fixed; inset: 0; z-index: 1250; width: 100%; height: 100%; padding: 0;
+    border: 0; background: rgba(0, 0, 0, .45);
+  }
+  .pc-kiot-close {
+    display: inline-grid; place-items: center; flex: 0 0 auto; width: 34px; height: 34px; margin-left: auto;
+    border: 1px solid rgba(255, 255, 255, .22); border-radius: 9px; background: rgba(255, 255, 255, .08);
+    color: #fff; font-size: 17px;
+  }
+  .app-container { width: 100%; margin-left: 0; }
+  .blue-header { gap: 10px; }
+  .pc-kiot-menu-toggle {
+    display: inline-grid; place-items: center; flex: 0 0 38px; width: 38px; height: 34px; padding: 0;
+    border: 1px solid rgba(255, 255, 255, .45); border-radius: 8px; background: rgba(255, 255, 255, .12);
+    color: #fff; font-size: 22px;
+  }
+  .blue-header-date, .blue-header-user { min-width: 0; }
+  .blue-header-user { overflow: hidden; max-width: 28vw; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+@media (max-width: 520px) {
+  .blue-header-date { display: none; }
+  .blue-header-user { max-width: 28vw; margin-left: auto; font-size: 11px; }
+  .blue-header .title { font-size: 12px; }
 }
 
 h1 { font-size: 20px; margin: 6px 0 16px; font-weight: 900; }

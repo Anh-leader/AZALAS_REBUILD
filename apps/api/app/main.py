@@ -1,10 +1,6 @@
-from pathlib import Path
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
-from .core.config import settings
 from .core.db import engine
 from .core.errors import ApiError, api_error_handler
 from .routers import admin, auth, customers, dashboard, debt, embroidery, fabric, hr, inventory, invoices, materials, media, orders, payments, printing_partners, production, reports, returns, shipping, zippers
@@ -38,7 +34,3 @@ def ready():
     except Exception as exc:
         return {"status": "not_ready", "database": "unavailable", "detail": str(exc)}
     return {"status": "ok", "database": "ok"}
-
-
-Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")

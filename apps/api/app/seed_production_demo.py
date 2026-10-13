@@ -158,6 +158,7 @@ def ensure_media(db, *, code: str, title: str, kind: str, accent: tuple[int, int
         if (
             media.status != "READY"
             or media.content_type != "image/png"
+            or media.storage_provider != "local"
             or media.storage != "LOCAL"
             or not stored_file.is_file()
         ):
@@ -167,6 +168,7 @@ def ensure_media(db, *, code: str, title: str, kind: str, accent: tuple[int, int
     data = _pattern_image(kind, accent)
     storage, bucket, version_id = put_object(object_key=object_key, data=data, content_type="image/png")
     media = MediaObject(
+        storage_provider="local",
         storage=storage,
         bucket=bucket,
         object_key=object_key,
@@ -174,6 +176,7 @@ def ensure_media(db, *, code: str, title: str, kind: str, accent: tuple[int, int
         original_name=filename,
         content_type="image/png",
         size_bytes=len(data),
+        checksum=hashlib.sha256(data).hexdigest(),
         sha256=hashlib.sha256(data).hexdigest(),
         status="READY",
         uploaded_by=user.id,
@@ -192,8 +195,8 @@ def seed(*, confirm_local_demo: bool) -> None:
     database_url = make_url(settings.database_url)
     if database_url.host not in {"localhost", "127.0.0.1", "::1"} or database_url.database != "azalas":
         raise SystemExit("Từ chối seed: chỉ cho phép DB local azalas.")
-    if settings.s3_bucket:
-        raise SystemExit("Từ chối seed: cấu hình S3 đang bật; script này chỉ tạo media local demo.")
+    if settings.storage_driver.lower() != "local":
+        raise SystemExit("Từ chối seed: script này chỉ tạo media local demo.")
 
     db = SessionLocal()
     try:

@@ -165,7 +165,7 @@ export type Order = {
   invoice_balance_amount: number
   version: number
   created_at: string | null
-  images: { id: string; url: string; original_name?: string | null; content_type?: string | null }[]
+  images: { id: string; url: string; view_url?: string; original_name?: string | null; content_type?: string | null }[]
 }
 export type RecentImage = {
   id: string
@@ -176,6 +176,7 @@ export type RecentImage = {
   order_date: string
   created_at: string | null
   url: string
+  view_url?: string
 }
 export type RecentImageGroup = {
   date: string
@@ -186,6 +187,7 @@ export type CustomerOrderGalleryStatus = 'NOT_PICKED' | 'PICKING' | 'PICKED' | '
 export type CustomerOrderGalleryImage = {
   id: string
   url: string
+  view_url?: string
   original_name: string | null
   created_at: string | null
   uploaded_by_name: string | null
@@ -313,7 +315,7 @@ export type ProductionBatch = {
   version: number
   thumbnail?: string | null
   payment_status?: 'paid' | 'unpaid'
-  images?: Array<{ id: string; url: string; original_name: string | null; content_type: string }>
+  images?: Array<{ id: string; url: string; view_url?: string; original_name: string | null; content_type: string }>
   size_plans?: Array<{ id: string; size: string; color_name: string | null; variant_code: string | null; layers: number; ratio: number; planned_quantity: number; product_variant_id: string | null }>
   receipts?: ProductionReceipt[]
 }
@@ -603,7 +605,7 @@ export type PrintingPartnerSettlement = {
   status: string
   notes: string | null
   version: number
-  media: { id: string; url: string; original_name: string | null; content_type: string } | null
+  media: { id: string; url: string; view_url?: string; original_name: string | null; content_type: string } | null
   created_at: string | null
   created_by_name?: string | null
 }
@@ -767,7 +769,7 @@ export type Invoice = {
   note: string | null; version: number; order_ids: string[]; allocated_amount: number
   unallocated_credit_amount: number; snapshot: any
   captured_invoice_media_id: string | null; captured_at: string | null
-  captured_image: { id: string; url: string; original_name: string | null; content_type: string | null } | null
+  captured_image: { id: string; url: string; view_url?: string; original_name: string | null; content_type: string | null } | null
 }
 
 export type InvoiceWorkQueue = {
@@ -777,13 +779,13 @@ export type InvoiceWorkQueue = {
 }
 
 export type InvoiceCapture = {
-  id: string; media_id: string; url: string; original_name: string | null; content_type: string | null
+  id: string; media_id: string; url: string; view_url?: string; original_name: string | null; content_type: string | null
 }
 
 export type InvoicePreview = {
   customer: { id: string; customer_code: string; name: string; phone: string | null; address: string | null }
   orders: Array<{ id: string; order_no: string; amount: number; items: any[]
-    images?: Array<{ id: string; url: string; original_name: string | null }> }>
+    images?: Array<{ id: string; url: string; view_url?: string; original_name: string | null }> }>
   subtotal_amount: number; surcharge_amount: number; return_credit_amount: number
   amount_due_before_payment: number; debt_before_amount: number; debt_after_before_payment: number
   available_returns: Array<{ id: string; return_no: string; amount: number; note: string | null }>

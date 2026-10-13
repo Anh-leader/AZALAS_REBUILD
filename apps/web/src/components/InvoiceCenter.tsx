@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import html2canvas from 'html2canvas'
 import { api, ApiError, type Invoice, type InvoiceCapture, type InvoicePreview, type InvoiceWorkQueue, type Order } from '../api/client'
+import { authenticatedMediaFetch, openAuthenticatedMedia, uploadMediaFile } from '../api/media'
 import { formatDate, formatMoney } from '../lib/format'
 import { partitionSelectedInvoiceOrders } from './invoiceSelection'
+import { useAuthenticatedMedia } from './useAuthenticatedMedia'
 
 type Tab = 'PENDING' | 'SENT' | 'DELETED'
 type PayLine = { key: string; method: 'CASH' | 'BANK_TRANSFER' | 'OTHER'; amount: string; note: string }
@@ -99,7 +101,12 @@ function SentInvoice({ invoice }: { invoice: Invoice }) {
   }
   return <div className="invoice-sent-row">
     <span className="invoice-sent-info"><b>{invoice.invoice_no}</b><small>{name} · {formatDate(invoice.issued_at)}</small></span>
-    {invoice.captured_image && <img className="invoice-capture-thumb" src={invoice.captured_image.url} alt="Ảnh hóa đơn" onClick={() => window.open(invoice.captured_image!.url, '_blank')}/>}
+    {invoice.captured_image && <InvoiceMediaImage
+      className="invoice-capture-thumb"
+      url={invoice.captured_image.view_url ?? invoice.captured_image.url}
+      alt="Ảnh hóa đơn"
+      onClick={() => void openAuthenticatedMedia(invoice.captured_image!.view_url ?? invoice.captured_image!.url).catch(() => setError('Không mở được ảnh hóa đơn.'))}
+    />}
     <strong>{formatMoney(invoice.balance_amount)}</strong>
     <span className="type-badge">{invoice.status}</span>
     <button className="btn-outline" onClick={printInvoice}>In</button>
@@ -183,9 +190,9 @@ function InvoiceForm({ customerId, orders, onClose, onChanged }: {
       const clipboardWrite = clipboard && 'write' in clipboard && typeof ClipboardItem !== 'undefined'
         ? clipboard.write([new ClipboardItem({ 'image/png': blob })]).then(() => true).catch(() => false)
         : Promise.resolve(false)
-      const form = new FormData(); form.append('file', blob, `hoa-don-${Date.now()}.png`)
-      const uploaded = await api<{ id: string }>('/media/upload', { method: 'POST', body: form })
-      const mediaId = uploaded.data.id
+      const imageFile = new File([blob], `hoa-don-${Date.now()}.png`, { type: 'image/png' })
+      const uploaded = await uploadMediaFile(imageFile, 'invoices')
+      const mediaId = uploaded.id
       const cap = await api<InvoiceCapture>('/invoices/capture-image', { method: 'POST', body: { customer_id: customerId, order_ids: orderIds, media_id: mediaId } })
       setCaptured(cap.data)
       setCapturedFor(captureKey)
@@ -200,8 +207,7 @@ function InvoiceForm({ customerId, orders, onClose, onChanged }: {
     try {
       const clipboard = navigator.clipboard
       if (!clipboard || !('write' in clipboard) || typeof ClipboardItem === 'undefined') throw new Error('Clipboard API không được hỗ trợ.')
-      const response = await fetch(captured.url)
-      if (!response.ok) throw new Error('Không tải được ảnh hóa đơn.')
+      const response = await authenticatedMediaFetch(captured.view_url ?? captured.url)
       const blob = await response.blob()
       await clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })])
       setCaptureNotice('Đã sao chép ảnh hóa đơn vào clipboard.')
@@ -213,8 +219,7 @@ function InvoiceForm({ customerId, orders, onClose, onChanged }: {
   async function downloadCapturedImage() {
     if (!captured) return
     try {
-      const response = await fetch(captured.url)
-      if (!response.ok) throw new Error('Không tải được ảnh hóa đơn.')
+      const response = await authenticatedMediaFetch(captured.view_url ?? captured.url)
       const blobUrl = URL.createObjectURL(await response.blob())
       const link = document.createElement('a')
       link.href = blobUrl
@@ -274,7 +279,7 @@ function InvoiceForm({ customerId, orders, onClose, onChanged }: {
         <button className="btn-outline" onClick={loadPreview} disabled={busy}>{busy && !preview ? 'ĐANG TẢI…' : 'XEM TRƯỚC HÓA ĐƠN'}</button>
         {preview && <div className="invoice-preview" ref={formRef}>
           <div className="invoice-customer"><b>{preview.customer.name}</b><small>{preview.customer.phone || 'Chưa có SĐT'}{preview.customer.address ? ` · ${preview.customer.address}` : ''}</small></div>
-          {allImages.length > 0 && <div className="invoice-attach"><b>Ảnh đính kèm</b><div className="invoice-attach-grid">{allImages.map(img => <img key={img.id} src={img.url} alt={img.order_no} title={img.order_no}/>)}</div></div>}
+          {allImages.length > 0 && <div className="invoice-attach"><b>Ảnh đính kèm</b><div className="invoice-attach-grid">{allImages.map(img => <InvoiceMediaImage key={img.id} className="invoice-attach-image" url={img.view_url ?? img.url} alt={img.order_no}/>)}</div></div>}
           <table className="invoice-items"><thead><tr><th>SP</th><th>SL</th><th>GIÁ</th><th>TIỀN</th></tr></thead><tbody>
             {preview.orders.flatMap(o => o.items).map((item, i) => <tr key={i}><td>{item.name}</td><td>{item.quantity}</td><td>{formatMoney(item.unit_price_amount)}</td><td>{formatMoney(item.line_total_amount)}</td></tr>)}
           </tbody></table>
@@ -304,9 +309,22 @@ function InvoiceForm({ customerId, orders, onClose, onChanged }: {
       <button className="btn-capture" disabled={captureBusy || !preview || !orderIds.length} onClick={captureImage}>
         {captureBusy ? 'ĐANG CHỤP…' : captured && capturedFor === captureKey ? 'Chụp lại ảnh hóa đơn' : 'Chụp ảnh hóa đơn'}
       </button>
-      {captured && capturedFor === captureKey && <><img className="invoice-capture-preview" src={captured.url} alt="Ảnh hóa đơn đã chụp"/><div className="invoice-capture-tools"><small>{captureNotice}</small><button className="btn-outline" onClick={copyCapturedImage}>Sao chép ảnh</button><button className="btn-outline" onClick={downloadCapturedImage}>Tải ảnh</button></div></>}
+      {captured && capturedFor === captureKey && <><InvoiceMediaImage className="invoice-capture-preview" url={captured.view_url ?? captured.url} alt="Ảnh hóa đơn đã chụp"/><div className="invoice-capture-tools"><small>{captureNotice}</small><button className="btn-outline" onClick={copyCapturedImage}>Sao chép ảnh</button><button className="btn-outline" onClick={downloadCapturedImage}>Tải ảnh</button></div></>}
       <button className="btn-danger" disabled={busy || !selectedIds.length} onClick={deleteOrders}>Xóa đơn đã chọn</button>
       <button className="btn-main" disabled={busy || !preview || !orderIds.length || !captured || capturedFor !== captureKey} onClick={confirmClose}>{busy ? 'ĐANG CHỐT…' : 'Xác nhận & chốt nợ'}</button>
     </div>
   </div>
+}
+
+function InvoiceMediaImage({ url, alt, className, onClick }: {
+  url: string
+  alt: string
+  className: string
+  onClick?: () => void
+}) {
+  const { source, failed } = useAuthenticatedMedia(url)
+  const [decodeFailed, setDecodeFailed] = useState(false)
+  if (failed || decodeFailed) return <span className={`${className} media-image-placeholder`} aria-label="Ảnh lỗi">Ảnh lỗi</span>
+  if (!source) return <span className={`${className} media-image-placeholder`} aria-label="Đang tải ảnh">Đang tải…</span>
+  return <img className={className} src={source} alt={alt} onClick={onClick} onError={() => setDecodeFailed(true)}/>
 }

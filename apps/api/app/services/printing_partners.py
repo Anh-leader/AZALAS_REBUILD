@@ -78,6 +78,7 @@ def _settlement_dict(row: PartnerSettlement, db: Session) -> dict:
         "media": {
             "id": str(media.id),
             "url": media_view_url(media.id),
+            "view_url": media_view_url(media.id),
             "original_name": media.original_name,
             "content_type": media.content_type,
         } if media else None,

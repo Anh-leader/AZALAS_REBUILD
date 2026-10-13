@@ -2,10 +2,12 @@ import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent } from
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import html2canvas from 'html2canvas'
 import { api, ApiError, type CuttingPaymentRow, type CuttingReportRow, type MaterialHistory, type ProductionBatch, type ProductionMaster, type ProductionReceipt, type WorkshopDebtStatement, type WorkshopSettlement } from '../api/client'
+import { uploadMediaFile } from '../api/media'
 import { useAuth } from '../api/auth'
 import { formatDateShort, formatMoney, todayIso } from '../lib/format'
 import { beginDialogSave, finishDialogSave, type SaveDialogState } from './productionUi'
 import { CreateBatch } from './CreateBatch'
+import { AuthenticatedImage } from './AuthenticatedImage'
 
 type Tab = 'create' | 'progress' | 'customer' | 'workshops' | 'cutting' | 'patterns'
 type MaterialLine = { name: string; totalRequired: string; quantity: string; deliverFull: boolean }
@@ -116,7 +118,7 @@ function Progress({ master }: { master: ProductionMaster }) {
 
     {batches.isLoading ? <div className="loading">Đang tải mâm…</div> : batches.error ? <div className="empty">{errorMessage(batches.error)}</div> : batches.data!.length === 0 ? <div className="empty">Không có mâm nào khớp bộ lọc.</div> : <div className="production-list">{batches.data!.map(batch => (
       <button className="card rap-card" key={batch.id} onClick={() => setSelected(batch)}>
-        <div className="rap-thumb">{batch.thumbnail ? <img src={batch.thumbnail} alt=""/> : <span className="rap-noimg"><i className="bi bi-scissors"/></span>}</div>
+        <div className="rap-thumb">{batch.thumbnail ? <AuthenticatedImage src={batch.thumbnail} alt="" fallback={<span className="rap-noimg"><i className="bi bi-scissors"/></span>}/> : <span className="rap-noimg"><i className="bi bi-scissors"/></span>}</div>
         <div className="rap-card-body">
           <div className="rap-card-title"><b>{batch.pattern_code}</b><small>{batch.batch_no}</small></div>
           <div>{batch.product_name}</div>
@@ -217,7 +219,7 @@ function CustomerOrders({ onNew }: { onNew: () => void }) {
     </div>
 
     {batches.isLoading ? <div className="loading">Đang tải khách đặt…</div> : batches.error ? <div className="empty">{errorMessage(batches.error)}</div> : batches.data!.length === 0 ? <div className="empty">Chưa có mâm khách đặt.</div> : <div className="production-list">{batches.data!.map(batch => <CustomerOrderCard key={batch.id} batch={batch} today={today} onOpenImage={setLightbox} onStartPicking={() => startPicking(batch)} onMarkDebt={() => markDebt(batch)} onDelete={() => setConfirmDelete(batch)}/>)}</div>}
-    {lightbox && <div className="modal-layer" onClick={() => setLightbox(null)}><div className="lightbox"><img src={lightbox} alt=""/></div></div>}
+    {lightbox && <div className="modal-layer" onClick={() => setLightbox(null)}><div className="lightbox"><AuthenticatedImage src={lightbox} alt="" fallback={<span className="media-image-fallback">Ảnh lỗi</span>}/></div></div>}
     {confirmDelete && <div className="modal-layer"><div className="modal-card"><h2>Xóa đơn khách đặt</h2><p>{confirmDelete.customer_name} · {confirmDelete.pattern_code} · {confirmDelete.product_name}</p><p className="muted">Đơn chưa phát sinh nghiệp vụ sẽ được xóa mềm; nếu đã phát sinh sẽ chuyển trạng thái hủy để giữ dữ liệu.</p><div className="modal-actions"><button className="btn-outline" onClick={() => setConfirmDelete(null)}>Hủy</button><button className="btn-main" onClick={doDelete}>XÁC NHẬN XÓA</button></div></div></div>}
   </>
 }
@@ -240,7 +242,7 @@ function CustomerOrderCard({ batch, today, onOpenImage, onStartPicking, onMarkDe
       <span className={overdue ? 'rap-overdue' : ''}>Giao: {formatDateShort(batch.expected_delivery_date)}</span>
       {batch.ratio_expression && <span>Tỉ lệ: {batch.ratio_expression}</span>}
     </div>
-    {batch.images && batch.images.length > 0 && <div className="rap-customer-images">{batch.images.map(img => <img key={img.id} src={img.url} alt="" onClick={() => onOpenImage(img.url)}/>)}</div>}
+    {batch.images && batch.images.length > 0 && <div className="rap-customer-images">{batch.images.map(img => <AuthenticatedImage key={img.id} src={img.view_url ?? img.url} alt="" onClick={() => onOpenImage(img.view_url ?? img.url)} fallback={<span className="media-image-fallback">Ảnh lỗi</span>}/>)}</div>}
     <div className={`rap-progress ${progressClass}`}><div className="rap-progress-fill" style={{ width: `${Math.round(progress * 100)}%` }}/></div>
     <div className="rap-progress-label"><span>Tiến độ xưởng: {batch.delivered_quantity}/{batch.planned_quantity}</span>{batch.remaining_quantity <= 0 ? <b className="rap-done">Đủ hàng</b> : <b>Còn {batch.remaining_quantity}</b>}</div>
     <div className="rap-customer-actions">
@@ -251,8 +253,8 @@ function CustomerOrderCard({ batch, today, onOpenImage, onStartPicking, onMarkDe
   </div>
 }
 
-type PatternNote = { id: string; note_no: string; title: string; content: string; created_at: string; image_count: number; cover_image: { id: string; url: string; original_name: string | null } | null }
-type PatternNoteDetail = PatternNote & { images: Array<{ id: string; url: string; original_name: string | null }> }
+type PatternNote = { id: string; note_no: string; title: string; content: string; created_at: string; image_count: number; cover_image: { id: string; url: string; view_url?: string; original_name: string | null } | null }
+type PatternNoteDetail = PatternNote & { images: Array<{ id: string; url: string; view_url?: string; original_name: string | null }> }
 
 function PatternGallery() {
   const qc = useQueryClient()
@@ -276,7 +278,7 @@ function PatternGallery() {
       <span className="muted">{rows.length} ghi chú</span>
     </div>
     {notes.isLoading ? <div className="pattern-grid">{Array.from({ length: 6 }).map((_, i) => <div className="pattern-card skeleton" key={i}/>)}</div> : notes.error ? <div className="empty">Không thể tải Mã Rập / Ảnh. <button className="btn-outline" onClick={() => notes.refetch()}>Thử lại</button></div> : rows.length === 0 ? <div className="empty">Chưa có ghi chú mã rập nào.</div> : <div className="pattern-grid">{rows.map(n => <button className="pattern-card" key={n.id} onClick={() => setSelected(n.id)}>
-      {n.cover_image ? <div className="pattern-cover"><img src={n.cover_image.url} alt="" loading="lazy"/>{n.image_count > 1 && <span className="pattern-count">📷 {n.image_count}</span>}</div> : <div className="pattern-cover pattern-empty"><i className="bi bi-image"/>{n.image_count > 1 && <span className="pattern-count">📷 {n.image_count}</span>}</div>}
+      {n.cover_image ? <div className="pattern-cover"><AuthenticatedImage src={n.cover_image.view_url ?? n.cover_image.url} alt="" loading="lazy" fallback={<span className="pattern-cover-fallback"><i className="bi bi-image"/></span>}/>{n.image_count > 1 && <span className="pattern-count">📷 {n.image_count}</span>}</div> : <div className="pattern-cover pattern-empty"><i className="bi bi-image"/>{n.image_count > 1 && <span className="pattern-count">📷 {n.image_count}</span>}</div>}
       <div className="pattern-body"><b>{n.title}</b><p>{n.content || 'Không có nội dung ghi chú'}</p><small>{new Date(n.created_at).toLocaleString('vi-VN')}</small></div>
     </button>)}</div>}
     {selected && <PatternNoteModal noteId={selected} onClose={() => setSelected(null)}/>}
@@ -314,9 +316,8 @@ function PatternNoteAddModal({ onClose, onSaved }: { onClose: () => void; onSave
     try {
       const mediaIds: string[] = []
       for (const item of uploads) {
-        const fd = new FormData(); fd.append('file', item.file)
-        const uploaded = await api<{ id: string }>('/media/upload', { method: 'POST', body: fd })
-        mediaIds.push(uploaded.data.id)
+        const uploaded = await uploadMediaFile(item.file, 'pattern-notes')
+        mediaIds.push(uploaded.id)
       }
       await api('/pattern-notes', { method: 'POST', body: { title: title.trim(), content: content.trim(), media_ids: mediaIds, client_token: crypto.randomUUID() } })
       setState(finishDialogSave(state, true)); onSaved()
@@ -350,10 +351,10 @@ function PatternNoteModal({ noteId, onClose }: { noteId: string; onClose: () => 
       <h2>{d.title}</h2>
       <small className="muted">{d.created_at ? new Date(d.created_at).toLocaleString('vi-VN') : ''}</small>
       <p>{d.content || 'Không có nội dung ghi chú.'}</p>
-      {d.images && d.images.length > 0 ? <div className="pattern-modal-images">{d.images.map(img => <img key={img.id} src={img.url} alt="" onClick={() => setLightbox(img.url)}/>)}</div> : <div className="empty">Không có ảnh.</div>}
+      {d.images && d.images.length > 0 ? <div className="pattern-modal-images">{d.images.map(img => <AuthenticatedImage key={img.id} src={img.view_url ?? img.url} alt="" onClick={() => setLightbox(img.view_url ?? img.url)} fallback={<span className="media-image-fallback">Ảnh lỗi</span>}/>)}</div> : <div className="empty">Không có ảnh.</div>}
     </> : null}
   </div>
-  {lightbox && <div className="modal-layer" onClick={() => setLightbox(null)}><div className="lightbox"><img src={lightbox} alt=""/></div></div>}</div>
+  {lightbox && <div className="modal-layer" onClick={() => setLightbox(null)}><div className="lightbox"><AuthenticatedImage src={lightbox} alt="" fallback={<span className="media-image-fallback">Ảnh lỗi</span>}/></div></div>}</div>
 }
 
 function BatchDrawer({ batchId, master, onClose, onSaved }: { batchId: string; master: ProductionMaster; onClose: () => void; onSaved: () => void }) {
@@ -364,7 +365,7 @@ function BatchDrawer({ batchId, master, onClose, onSaved }: { batchId: string; m
   const [historyOpen, setHistoryOpen] = useState(false); const [editOpen, setEditOpen] = useState(false)
   const [forceOpen, setForceOpen] = useState(false); const [importOpen, setImportOpen] = useState(false)
   return <div className="drawer-layer"><section className="drawer"><header className="blue-header"><button className="btn-back" onClick={onClose}>← Quay lại</button><span className="title">Chi tiết mâm</span></header>{detail.isLoading ? <div className="loading">Đang tải…</div> : detail.error ? <div className="empty">{errorMessage(detail.error)}</div> : <>
-    <div className="card production-detail"><h2>{detail.data!.batch_no}</h2><p>{detail.data!.pattern_code} · {detail.data!.product_name}</p><div className="money-grid"><span>Kế hoạch<b>{detail.data!.planned_quantity}</b></span><span>Đã nhập<b>{detail.data!.delivered_quantity}</b></span><span>Còn lại<b>{detail.data!.remaining_quantity}</b></span><span>Tiền công<b>{formatMoney(detail.data!.workshop_amount)}</b></span></div><p>Nhà may: <b>{detail.data!.workshop.name}</b> · Thợ cắt: <b>{detail.data!.cutting_team.name}</b></p>{detail.data!.images && detail.data!.images.length > 0 && <div className="upload-grid">{detail.data!.images.map(img => <div className="upload-preview" key={img.id}><img src={img.url} alt={img.original_name || ''}/></div>)}</div>}<div className="action-row"><button className="btn-main" onClick={() => setReceiptOpen(true)}>Nhập</button><button className="btn-outline" onClick={() => setHistoryOpen(true)}>Lịch sử</button><button className="btn-outline" onClick={() => setEditOpen(true)}>Sửa TT</button><button className="btn-outline" onClick={() => setMaterialOpen(true)}>Thêm phụ liệu</button>{detail.data!.delivered_quantity > (detail.data!.imported_quantity ?? 0) && <button className="btn-outline" onClick={() => setImportOpen(true)}>Nhập kho</button>}{isOwner && <button className="btn-outline" onClick={() => setForceOpen(true)}>Ép chốt</button>}</div></div>
+    <div className="card production-detail"><h2>{detail.data!.batch_no}</h2><p>{detail.data!.pattern_code} · {detail.data!.product_name}</p><div className="money-grid"><span>Kế hoạch<b>{detail.data!.planned_quantity}</b></span><span>Đã nhập<b>{detail.data!.delivered_quantity}</b></span><span>Còn lại<b>{detail.data!.remaining_quantity}</b></span><span>Tiền công<b>{formatMoney(detail.data!.workshop_amount)}</b></span></div><p>Nhà may: <b>{detail.data!.workshop.name}</b> · Thợ cắt: <b>{detail.data!.cutting_team.name}</b></p>{detail.data!.images && detail.data!.images.length > 0 && <div className="upload-grid">{detail.data!.images.map(img => <div className="upload-preview" key={img.id}><AuthenticatedImage src={img.view_url ?? img.url} alt={img.original_name || ''} fallback={<span className="media-image-fallback">Ảnh lỗi</span>}/></div>)}</div>}<div className="action-row"><button className="btn-main" onClick={() => setReceiptOpen(true)}>Nhập</button><button className="btn-outline" onClick={() => setHistoryOpen(true)}>Lịch sử</button><button className="btn-outline" onClick={() => setEditOpen(true)}>Sửa TT</button><button className="btn-outline" onClick={() => setMaterialOpen(true)}>Thêm phụ liệu</button>{detail.data!.delivered_quantity > (detail.data!.imported_quantity ?? 0) && <button className="btn-outline" onClick={() => setImportOpen(true)}>Nhập kho</button>}{isOwner && <button className="btn-outline" onClick={() => setForceOpen(true)}>Ép chốt</button>}</div></div>
     {receiptOpen && <ReceiptModal batch={detail.data!} onClose={() => setReceiptOpen(false)} onSaved={onSaved}/>} 
     {historyOpen && <HistoryModal batch={detail.data!} onClose={() => setHistoryOpen(false)}/>} 
     {editOpen && <EditBatchModal batch={detail.data!} master={master} onClose={() => setEditOpen(false)} onSaved={onSaved}/>} 

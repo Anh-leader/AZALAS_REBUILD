@@ -6,7 +6,9 @@ import {
   type CustomerOrderGalleryOrder,
   type CustomerOrderGalleryStatus,
 } from '../api/client'
+import { downloadAuthenticatedMedia } from '../api/media'
 import { LazyImage } from './LazyImage'
+import { useAuthenticatedMedia } from './useAuthenticatedMedia'
 
 type GallerySort = 'created_desc' | 'created_asc'
 type GalleryStatusFilter = '' | CustomerOrderGalleryStatus
@@ -192,7 +194,7 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
       </section> : <div className="kho-anh-lightbox-content" onClick={event => event.stopPropagation()}>
         {selectedImage.order.images.length > 1 && <button type="button" className="lightbox-nav prev" aria-label="Ảnh trước" onClick={() => setSelectedImage({ order: selectedImage.order, index: (selectedImage.index - 1 + selectedImage.order.images.length) % selectedImage.order.images.length })}>‹</button>}
         <div className="kho-anh-lightbox-photo">
-          <GalleryLargeImage src={selectedImage.order.images[selectedImage.index].url} alt={selectedImage.order.images[selectedImage.index].original_name || 'Ảnh đơn hàng'}/>
+          <GalleryLargeImage src={selectedImage.order.images[selectedImage.index].view_url ?? selectedImage.order.images[selectedImage.index].url} alt={selectedImage.order.images[selectedImage.index].original_name || 'Ảnh đơn hàng'}/>
           <span>{selectedImage.index + 1}/{selectedImage.order.images.length}</span>
         </div>
         {selectedImage.order.images.length > 1 && <button type="button" className="lightbox-nav next" aria-label="Ảnh sau" onClick={() => setSelectedImage({ order: selectedImage.order, index: (selectedImage.index + 1) % selectedImage.order.images.length })}>›</button>}
@@ -201,8 +203,11 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
           <span>{selectedImage.order.order_no}</span>
           <span>{selectedImage.order.created_at ? new Date(selectedImage.order.created_at).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : selectedImage.order.order_date.split('-').reverse().join('/')}</span>
           <button type="button" className="btn-main" onClick={() => setViewingOrderId(selectedImage.order.order_id)}>Xem đơn</button>
-          <a className="btn-outline" href={selectedImage.order.images[selectedImage.index].url} download={selectedImage.order.images[selectedImage.index].original_name || 'anh-don-hang'}>Tải ảnh</a>
-          <button type="button" className="btn-outline" onClick={() => void copyImageUrl(selectedImage.order.images[selectedImage.index].url)}>Sao chép link ảnh</button>
+          <button type="button" className="btn-outline" onClick={() => void downloadAuthenticatedMedia(
+            selectedImage.order.images[selectedImage.index].view_url ?? selectedImage.order.images[selectedImage.index].url,
+            selectedImage.order.images[selectedImage.index].original_name || 'anh-don-hang',
+          ).catch(() => setCopyNotice('Không thể tải ảnh.'))}>Tải ảnh</button>
+          <button type="button" className="btn-outline" onClick={() => void copyImageUrl(selectedImage.order.images[selectedImage.index].view_url ?? selectedImage.order.images[selectedImage.index].url)}>Sao chép link ảnh</button>
           {copyNotice && <small role="status">{copyNotice}</small>}
         </aside>
       </div>}
@@ -250,7 +255,7 @@ function OrderCard({ order, onImageClick }: { order: CustomerOrderGalleryOrder; 
     {order.note && <p className="kho-anh-note">{order.note}</p>}
     <div className="kho-anh-thumbnails" aria-label={`${order.image_count} ảnh của đơn ${order.order_no}`}>
       {order.images.slice(0, 4).map((image, index) => <button type="button" className="kho-anh-thumb" key={image.id} aria-label={`Xem ảnh ${index + 1} của đơn ${order.order_no}`} onClick={() => onImageClick(index)}>
-        <LazyImage src={image.url} alt={image.original_name || `Ảnh ${index + 1} của ${order.customer_name}`}/>
+        <LazyImage src={image.view_url ?? image.url} alt={image.original_name || `Ảnh ${index + 1} của ${order.customer_name}`}/>
         {index === 3 && order.image_count > 4 && <span className="kho-anh-more">+{order.image_count - 3}</span>}
       </button>)}
     </div>
@@ -258,9 +263,12 @@ function OrderCard({ order, onImageClick }: { order: CustomerOrderGalleryOrder; 
 }
 
 function GalleryLargeImage({ src, alt }: { src: string; alt: string }) {
-  const [failed, setFailed] = useState(false)
-  if (failed) return <div className="kho-anh-lightbox-fallback">Ảnh lỗi</div>
-  return <img src={src} alt={alt} onError={() => setFailed(true)}/>
+  const { source, failed } = useAuthenticatedMedia(src)
+  const [decodeFailed, setDecodeFailed] = useState(false)
+  useEffect(() => setDecodeFailed(false), [src])
+  if (failed || decodeFailed) return <div className="kho-anh-lightbox-fallback">Ảnh lỗi</div>
+  if (!source) return <div className="kho-anh-lightbox-fallback">Đang tải ảnh…</div>
+  return <img src={source} alt={alt} onError={() => setDecodeFailed(true)}/>
 }
 
 function GallerySkeleton() {

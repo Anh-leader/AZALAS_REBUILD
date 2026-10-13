@@ -77,6 +77,7 @@ def recent_images(
             "order_date": order.created_date.isoformat(),
             "created_at": media.created_at.isoformat() if media.created_at else None,
             "url": media_view_url(media.id),
+            "view_url": media_view_url(media.id),
         })
 
     # Sort theo ngày thật (không sort chuỗi dd/MM/yyyy).
@@ -188,6 +189,7 @@ def customer_order_gallery(
         card["images"].setdefault(str(media.id), {
             "id": str(media.id),
             "url": media_view_url(media.id),
+            "view_url": media_view_url(media.id),
             "original_name": media.original_name,
             "created_at": media.created_at.isoformat() if media.created_at else None,
             "uploaded_by_name": uploader_name,

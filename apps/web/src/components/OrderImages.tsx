@@ -1,6 +1,7 @@
-import { useState, type KeyboardEvent } from 'react'
+import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useAuthenticatedMedia } from './useAuthenticatedMedia'
 
-export type OrderImage = { id: string; url: string; original_name?: string | null; content_type?: string | null }
+export type OrderImage = { id: string; url: string; view_url?: string; original_name?: string | null; content_type?: string | null }
 
 export function OrderImages({ images }: { images: OrderImage[] }) {
   const [lightbox, setLightbox] = useState<number | null>(null)
@@ -22,7 +23,7 @@ export function OrderImages({ images }: { images: OrderImage[] }) {
     </div>
     {lightbox !== null && <div className="lightbox" role="dialog" aria-modal="true" onClick={close}>
       <button className="lightbox-close" onClick={close} aria-label="Đóng">×</button>
-      <img className="lightbox-img" src={images[lightbox].url} alt={images[lightbox].original_name ?? ''} onClick={e => e.stopPropagation()}/>
+      <OrderLightboxImage image={images[lightbox]}/>
       {images.length > 1 && <><button className="lightbox-nav prev" onClick={e => { e.stopPropagation(); setLightbox(i => (i === null ? i : (i - 1 + images.length) % images.length)) }} aria-label="Ảnh trước">‹</button>
       <button className="lightbox-nav next" onClick={e => { e.stopPropagation(); setLightbox(i => (i === null ? i : (i + 1) % images.length)) }} aria-label="Ảnh sau">›</button></>}
     </div>}
@@ -30,9 +31,21 @@ export function OrderImages({ images }: { images: OrderImage[] }) {
 }
 
 function OrderThumb({ image, onClick }: { image: OrderImage; onClick: () => void }) {
-  const [state, setState] = useState<'loading' | 'loaded' | 'error'>('loading')
+  const { source, failed } = useAuthenticatedMedia(image.view_url ?? image.url)
+  const [decodeFailed, setDecodeFailed] = useState(false)
+  useEffect(() => setDecodeFailed(false), [image.id])
   return <button type="button" className="order-images-item" onClick={onClick} title={image.original_name ?? 'Ảnh đơn'}>
-    {state !== 'error' && <img src={image.url} alt={image.original_name ?? ''} className={state === 'loading' ? 'is-loading' : ''} onLoad={() => setState('loaded')} onError={() => setState('error')}/>}
-    {state === 'error' && <span className="order-images-fallback"><i className="bi bi-image"/></span>}
+    {!failed && !decodeFailed && source && <img src={source} alt={image.original_name ?? ''} onError={() => setDecodeFailed(true)}/>}
+    {(!source || failed || decodeFailed) && <span className="order-images-fallback"><i className="bi bi-image"/></span>}
   </button>
+}
+
+function OrderLightboxImage({ image }: { image: OrderImage }) {
+  const { source, failed } = useAuthenticatedMedia(image.view_url ?? image.url)
+  const [decodeFailed, setDecodeFailed] = useState(false)
+  useEffect(() => setDecodeFailed(false), [image.id])
+  if (failed || decodeFailed) return <span className="order-images-fallback"><i className="bi bi-image"/></span>
+  return source
+    ? <img className="lightbox-img" src={source} alt={image.original_name ?? ''} onError={() => setDecodeFailed(true)}/>
+    : <span className="order-images-fallback"><i className="bi bi-image"/></span>
 }
