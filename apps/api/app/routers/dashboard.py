@@ -1,5 +1,4 @@
 from datetime import date, datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
@@ -9,12 +8,10 @@ from ..core.db import get_db
 from ..core.deps import require_permission
 from ..core.errors import ApiError
 from ..core.rbac import access_for_user
-from ..models import DebtLedgerEntry, Invoice, InvoiceOrder, Order, Payment, User
+from ..models import DebtLedgerEntry, Invoice, Order, Payment, User
+from ..services.order_metrics import BUSINESS_TZ, INVOICE_SENT_STATUSES, order_metrics
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
-BUSINESS_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
-INVOICE_SENT_STATUSES = ("SENT", "PAID", "PARTIALLY_PAID")
-INVOICE_PENDING_ORDER_STATUSES = ("PICKED", "SHIPPING", "COMPLETED")
 
 
 @router.get("/overview")
@@ -33,45 +30,15 @@ def overview(
     start_at = datetime.combine(period_start, time.min, tzinfo=BUSINESS_TZ).astimezone(timezone.utc)
     end_at = datetime.combine(period_end + timedelta(days=1), time.min, tzinfo=BUSINESS_TZ).astimezone(timezone.utc)
 
-    status_counts = dict(db.execute(
-        select(Order.status, func.count(Order.id))
-        .where(Order.created_date.between(period_start, period_end))
-        .group_by(Order.status)
-    ).all())
-    total_orders = sum(status_counts.values())
-    invoice_pending = int(db.scalar(
-        select(func.count(Order.id))
-        .where(
-            Order.created_date.between(period_start, period_end),
-            Order.status.in_(INVOICE_PENDING_ORDER_STATUSES),
-            Order.billing_status.in_(("DRAFT", "READY")),
-            ~select(InvoiceOrder.id).where(InvoiceOrder.order_id == Order.id).exists(),
-        )
-    ) or 0)
-    sent_invoice_link = (
-        select(InvoiceOrder.id)
-        .join(Invoice, Invoice.id == InvoiceOrder.invoice_id)
-        .where(
-            InvoiceOrder.order_id == Order.id,
-            Invoice.status.in_(INVOICE_SENT_STATUSES),
-        )
-        .exists()
-    )
-    invoice_sent = int(db.scalar(
-        select(func.count(Order.id))
-        .where(
-            Order.created_date.between(period_start, period_end),
-            sent_invoice_link,
-            Order.status.not_in(("CANCELLED", "DELETED")),
-        )
-    ) or 0)
-    cancelled_orders = int(db.scalar(
-        select(func.count(Order.id))
-        .where(
-            Order.created_date.between(period_start, period_end),
-            (Order.status.in_(("CANCELLED", "DELETED")) | (Order.billing_status == "DELETED")),
-        )
-    ) or 0)
+    metrics = order_metrics(db, date_from=period_start, date_to=period_end)
+    total_orders = metrics["total"]
+    invoice_pending = metrics["invoice_pending"]
+    invoice_sent = metrics["invoice_sent"]
+    cancelled_orders = metrics["cancelled"]
+    new_orders = metrics["new"]
+    picking_orders = metrics["picking"]
+    debt_orders = metrics["debt"]
+    picked_orders = metrics["picked"]
 
     roles, _ = access_for_user(db, user)
     financial_available = "OWNER" in roles or "ADMIN" in roles
@@ -123,11 +90,6 @@ def overview(
         }
 
     recent = db.scalars(select(Order).order_by(Order.created_at.desc()).limit(5)).unique()
-    new_orders = status_counts.get("NEW", 0)
-    picking_orders = status_counts.get("PICKING", 0)
-    shipping_orders = status_counts.get("SHIPPING", 0)
-    completed_orders = status_counts.get("COMPLETED", 0)
-    debt_orders = status_counts.get("DEBT_ORDER", 0)
     return {
         "data": {
             "period": {
@@ -139,6 +101,7 @@ def overview(
                 "total_orders": total_orders,
                 "new_orders": new_orders,
                 "picking_orders": picking_orders,
+                "picked_orders": picked_orders,
                 "invoice_pending": invoice_pending,
                 "invoice_sent": invoice_sent,
                 "debt_orders": debt_orders,
@@ -147,8 +110,6 @@ def overview(
             # Retain flat fields for existing clients during the dashboard migration.
             "new_orders": new_orders,
             "picking_orders": picking_orders,
-            "shipping_orders": shipping_orders,
-            "completed_orders": completed_orders,
             "debt_orders": debt_orders,
             "recent_activity": [
                 {

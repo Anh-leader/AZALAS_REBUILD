@@ -114,7 +114,7 @@ describe('authenticated media UI', () => {
     expect(document.querySelector('.kho-anh-lightbox-fallback')?.textContent).toContain('Ảnh lỗi')
   })
 
-  it('passes pasted clipboard images to the upload workflow', () => {
+  it('passes pasted clipboard images to the upload workflow', async () => {
     const onAdd = vi.fn()
     const root = createRoot(container)
     roots.push(root)
@@ -130,6 +130,10 @@ describe('authenticated media UI', () => {
     })
     act(() => document.querySelector('[aria-label="Vùng dán ảnh đơn hàng"]')?.dispatchEvent(event))
 
-    expect(onAdd).toHaveBeenCalledWith([file], 'clipboard')
+    await waitFor(() => expect(onAdd).toHaveBeenCalledWith(
+      [file],
+      'clipboard',
+      [expect.stringMatching(/^blob:3\|image\/png\|/)],
+    ))
   })
 })

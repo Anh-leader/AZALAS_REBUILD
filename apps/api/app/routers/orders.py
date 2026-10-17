@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 from typing import Literal
 
@@ -9,11 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..core.deps import current_user, require_owner
+from ..core.deps import current_user, require_owner, require_permission
 from ..core.errors import ApiError
 from ..models import Order, User, Warehouse
 from ..services import orders as svc
 from ..services import inventory as inventory_svc
+from ..services import order_metrics as order_metrics_svc
 
 router = APIRouter(tags=["orders"])
 
@@ -104,6 +105,20 @@ def claim_order(order_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     return {"data": svc.order_to_dict(svc.claim_order(db, order_id=order_id, user=user))}
 
 
+class ReleaseClaimRequest(BaseModel):
+    reason: str | None = Field(None, max_length=500)
+
+
+@router.post("/orders/{order_id}/release-claim")
+def release_claim(
+    order_id: uuid.UUID,
+    body: ReleaseClaimRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    return {"data": svc.order_to_dict(svc.release_claim(db, order_id=order_id, user=user, reason=body.reason))}
+
+
 @router.post("/orders/{order_id}/finish-picking")
 def finish_picking(order_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(current_user)):
     return {"data": svc.order_to_dict(inventory_svc.finish_picking_compat(db, order_id=order_id, user=user))}
@@ -112,6 +127,20 @@ def finish_picking(order_id: uuid.UUID, db: Session = Depends(get_db), user: Use
 @router.get("/orders/{order_id}")
 def order_detail(order_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(current_user)):
     return {"data": inventory_svc.order_detail(db, order_id=order_id)}
+
+
+class DeleteOrderRequest(BaseModel):
+    reason: str | None = Field(None, max_length=500)
+
+
+@router.delete("/orders/{order_id}")
+def delete_order(
+    order_id: uuid.UUID,
+    body: DeleteOrderRequest | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("order.delete")),
+):
+    return {"data": svc.delete_order(db, order_id=order_id, user=user, reason=body.reason if body else None)}
 
 
 @router.put("/orders/{order_id}/pick")
@@ -155,46 +184,5 @@ def customer_queue(
 @router.get("/picker-statistics")
 def picker_statistics(month: str | None = None, warehouse_id: uuid.UUID | None = None,
                       db: Session = Depends(get_db), _=Depends(require_owner)):
-    """OWNER only. Đã soạn tính theo picked_at, Đang soạn theo updated_at."""
-    today = datetime.now(svc.TZ).date()
-    try:
-        y, m = (int(x) for x in month.split("-")) if month else (today.year, today.month)
-        start = datetime(y, m, 1, tzinfo=svc.TZ)
-    except ValueError as exc:
-        raise ApiError(422, "INVALID_MONTH", "Tháng phải có dạng YYYY-MM.") from exc
-    end = datetime(y + (m == 12), m % 12 + 1, 1, tzinfo=svc.TZ)
-
-    def in_month(dt: datetime | None) -> bool:
-        if dt is None:
-            return False
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return start <= dt < end
-
-    pickers: dict[str, dict] = {}
-    stmt = select(Order).where(Order.claimed_by.is_not(None))
-    if warehouse_id:
-        stmt = stmt.where(Order.warehouse_id == warehouse_id)
-    for o in db.scalars(stmt).unique():
-        picked = in_month(o.picked_at)
-        picking = o.status == "PICKING" and in_month(o.updated_at)
-        if not (picked or picking):
-            continue
-        p = pickers.setdefault(
-            str(o.claimed_by),
-            {"user_id": str(o.claimed_by), "name": o.claimer.display_name, "picked": 0, "picking": 0,
-             "by_warehouse": {}, "orders": []},
-        )
-        p["picked" if picked else "picking"] += 1
-        p["by_warehouse"][o.warehouse.name] = p["by_warehouse"].get(o.warehouse.name, 0) + 1
-        p["orders"].append(svc.order_to_dict(o))
-    rows = sorted(pickers.values(), key=lambda p: -(p["picked"] + p["picking"]))
-    return {
-        "data": {
-            "month": f"{y:04d}-{m:02d}",
-            "total": sum(p["picked"] + p["picking"] for p in rows),
-            "picked": sum(p["picked"] for p in rows),
-            "picking": sum(p["picking"] for p in rows),
-            "pickers": rows,
-        }
-    }
+    """OWNER only. Dùng chung order_metrics (created_date + classification chuẩn)."""
+    return {"data": order_metrics_svc.picker_statistics(db, month=month, warehouse_id=warehouse_id)}

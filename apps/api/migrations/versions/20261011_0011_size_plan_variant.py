@@ -5,7 +5,6 @@ Revises: 20261011_0010
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "20261011_0011"
 down_revision = "20261011_0010"
@@ -14,12 +13,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("production_batch_size_plans", sa.Column("variant_code", sa.String(80), nullable=True))
-    op.drop_constraint("uq_batch_size_plan", "production_batch_size_plans", type_="unique")
-    op.create_unique_constraint("uq_batch_size_plan", "production_batch_size_plans", ["batch_id", "color_id", "size", "variant_code"])
+    # production_batch_size_plans.variant_code and the four-column unique
+    # constraint are created by the baseline revision 20261009_0001 via
+    # Base.metadata.create_all(checkfirst=True). Nothing extra to do here.
+    pass
 
 
 def downgrade() -> None:
-    op.drop_constraint("uq_batch_size_plan", "production_batch_size_plans", type_="unique")
-    op.create_unique_constraint("uq_batch_size_plan", "production_batch_size_plans", ["batch_id", "color_id", "size"])
-    op.drop_column("production_batch_size_plans", "variant_code")
+    # Objects are owned by the baseline revision; do not drop them here.
+    pass

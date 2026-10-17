@@ -8,7 +8,10 @@ from app.core.db import Base
 import app.models  # noqa: F401 - imports all metadata before Alembic inspects it
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option(
+    "sqlalchemy.url",
+    settings.database_url.replace("%", "%%"),
+)
 target_metadata = Base.metadata
 
 

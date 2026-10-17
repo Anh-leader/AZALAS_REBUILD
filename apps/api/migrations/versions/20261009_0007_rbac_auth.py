@@ -37,28 +37,9 @@ ROLE_PERMISSIONS = {
 
 
 def upgrade() -> None:
-    op.create_table("roles", sa.Column("id", UUID(), primary_key=True), sa.Column("code", sa.String(50), nullable=False, unique=True),
-        sa.Column("name", sa.String(150), nullable=False), sa.Column("description", sa.Text()),
-        sa.Column("is_system", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False))
-    op.create_table("permissions", sa.Column("id", UUID(), primary_key=True), sa.Column("code", sa.String(100), nullable=False, unique=True),
-        sa.Column("module", sa.String(50), nullable=False), sa.Column("action", sa.String(50), nullable=False), sa.Column("description", sa.Text()))
-    op.create_index("ix_permissions_module", "permissions", ["module"])
-    op.create_table("user_roles", sa.Column("user_id", UUID(), sa.ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
-        sa.Column("role_id", UUID(), sa.ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
-        sa.Column("assigned_by", UUID(), sa.ForeignKey("users.id")),
-        sa.Column("assigned_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False))
-    op.create_table("role_permissions", sa.Column("role_id", UUID(), sa.ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
-        sa.Column("permission_id", UUID(), sa.ForeignKey("permissions.id", ondelete="CASCADE"), primary_key=True))
-    op.create_table("refresh_tokens", sa.Column("id", UUID(), primary_key=True),
-        sa.Column("user_id", UUID(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("token_hash", sa.String(64), nullable=False, unique=True), sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("revoked_at", sa.DateTime(timezone=True)), sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("created_ip", sa.String(64)))
-    op.create_index("ix_refresh_tokens_user_id", "refresh_tokens", ["user_id"])
-    op.create_index("ix_refresh_tokens_expires_at", "refresh_tokens", ["expires_at"])
-
+    # roles/permissions/user_roles/role_permissions/refresh_tokens are created by
+    # the baseline revision 20261009_0001 via Base.metadata.create_all(checkfirst=True).
+    # This migration only seeds the system RBAC roles/permissions (data, not schema).
     role_ids = {code: uuid.uuid4() for code in ROLE_PERMISSIONS}
     permission_ids = {code: uuid.uuid4() for code, _, _ in PERMISSIONS}
     roles = sa.table("roles", sa.column("id", UUID()), sa.column("code", sa.String()), sa.column("name", sa.String()),
@@ -76,5 +57,26 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for table in ("refresh_tokens", "role_permissions", "user_roles", "permissions", "roles"):
-        op.drop_table(table)
+    # Reverse the seed only; do not drop the RBAC tables (owned by baseline 0001).
+    role_codes = sorted(ROLE_PERMISSIONS)
+    permission_codes = sorted({code for code, _, _ in PERMISSIONS})
+
+    def quoted(codes):
+        return ", ".join(f"'{c}'" for c in codes)
+
+    bind = op.get_bind()
+    bind.execute(sa.text(
+        "DELETE FROM role_permissions "
+        f"WHERE role_id IN (SELECT id FROM roles WHERE code IN ({quoted(role_codes)})) "
+        f"OR permission_id IN (SELECT id FROM permissions WHERE code IN ({quoted(permission_codes)}))"
+    ))
+    bind.execute(sa.text(
+        "DELETE FROM user_roles "
+        f"WHERE role_id IN (SELECT id FROM roles WHERE code IN ({quoted(role_codes)}))"
+    ))
+    bind.execute(sa.text(
+        f"DELETE FROM permissions WHERE code IN ({quoted(permission_codes)})"
+    ))
+    bind.execute(sa.text(
+        f"DELETE FROM roles WHERE code IN ({quoted(role_codes)}) AND is_system = TRUE"
+    ))

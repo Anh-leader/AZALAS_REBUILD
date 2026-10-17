@@ -1,7 +1,6 @@
 """record canonical media storage provider and checksum"""
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "20261013_0021"
 down_revision = "20261012_0020"
@@ -10,14 +9,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "media_objects",
-        sa.Column("storage_provider", sa.String(length=20), server_default="local", nullable=False),
-    )
-    op.add_column(
-        "media_objects",
-        sa.Column("checksum", sa.String(length=64), server_default="", nullable=False),
-    )
+    # media_objects.storage_provider and checksum are created by the baseline
+    # revision 20261009_0001 via Base.metadata.create_all(checkfirst=True). This
+    # migration only backfills canonical values for pre-existing rows (data).
     op.execute(
         """
         UPDATE media_objects
@@ -28,5 +22,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("media_objects", "checksum")
-    op.drop_column("media_objects", "storage_provider")
+    # Forward-only data backfill; no schema to reverse.
+    pass

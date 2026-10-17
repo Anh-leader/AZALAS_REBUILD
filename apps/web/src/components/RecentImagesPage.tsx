@@ -2,11 +2,15 @@ import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
+  STATUS_LABEL,
   type CustomerOrderGalleryGroup,
   type CustomerOrderGalleryOrder,
   type CustomerOrderGalleryStatus,
+  type Invoice,
+  type OrderDetail,
 } from '../api/client'
 import { downloadAuthenticatedMedia } from '../api/media'
+import { formatDate, formatMoney } from '../lib/format'
 import { LazyImage } from './LazyImage'
 import { useAuthenticatedMedia } from './useAuthenticatedMedia'
 
@@ -63,12 +67,15 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
   const orderDetail = useQuery({
     queryKey: ['order-detail', viewingOrderId],
     enabled: Boolean(viewingOrderId),
-    queryFn: () => api<{
-      order: { order_no: string; status: string; created_date: string; delivery_date: string | null; customer_note: string | null }
-      customer: { name: string }
-      warehouse: { name: string }
-    }>(`/orders/${viewingOrderId}`).then(response => response.data),
+    queryFn: () => api<OrderDetail>(`/orders/${viewingOrderId}`).then(response => response.data),
   })
+
+  const linkedInvoices = useQuery({
+    queryKey: ['order-linked-invoices', orderDetail.data?.customer.id],
+    enabled: Boolean(orderDetail.data),
+    queryFn: () => api<Invoice[]>('/invoices', { query: { customer_id: orderDetail.data!.customer.id } }).then(response => response.data),
+  })
+  const linkedInvoice = viewingOrderId ? linkedInvoices.data?.find(invoice => invoice.order_ids.includes(viewingOrderId)) : undefined
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -178,20 +185,7 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
     </section>
     {selectedImage && <div className="kho-anh-lightbox" role="dialog" aria-modal="true" aria-label="Xem ảnh đơn hàng" onClick={() => { setSelectedImage(null); setViewingOrderId(null) }}>
       <button type="button" className="kho-anh-lightbox-close" aria-label="Đóng" onClick={() => { setSelectedImage(null); setViewingOrderId(null) }}>×</button>
-      {viewingOrderId ? <section className="kho-anh-order-detail" onClick={event => event.stopPropagation()}>
-        <header><h2>Chi tiết đơn</h2><button type="button" className="kho-anh-lightbox-close-inline" onClick={() => setViewingOrderId(null)}>Quay lại ảnh</button></header>
-        {orderDetail.isLoading ? <p>Đang tải đơn…</p> : orderDetail.isError ? <p className="error-text">Không thể tải chi tiết đơn.</p> : orderDetail.data && <>
-          <dl>
-            <div><dt>Mã đơn</dt><dd>{orderDetail.data.order.order_no}</dd></div>
-            <div><dt>Khách hàng</dt><dd>{orderDetail.data.customer.name}</dd></div>
-            <div><dt>Kho</dt><dd>{orderDetail.data.warehouse.name}</dd></div>
-            <div><dt>Ngày tạo</dt><dd>{orderDetail.data.order.created_date}</dd></div>
-            <div><dt>Ngày giao</dt><dd>{orderDetail.data.order.delivery_date || 'Chưa có'}</dd></div>
-            <div><dt>Trạng thái</dt><dd>{GALLERY_STATUS_LABEL[selectedImage.order.status]}</dd></div>
-            {orderDetail.data.order.customer_note && <div><dt>Ghi chú</dt><dd>{orderDetail.data.order.customer_note}</dd></div>}
-          </dl>
-        </>}
-      </section> : <div className="kho-anh-lightbox-content" onClick={event => event.stopPropagation()}>
+      {viewingOrderId ? <OrderDetailPanel detail={orderDetail} invoice={linkedInvoice} onBack={() => setViewingOrderId(null)}/> : <div className="kho-anh-lightbox-content" onClick={event => event.stopPropagation()}>
         {selectedImage.order.images.length > 1 && <button type="button" className="lightbox-nav prev" aria-label="Ảnh trước" onClick={() => setSelectedImage({ order: selectedImage.order, index: (selectedImage.index - 1 + selectedImage.order.images.length) % selectedImage.order.images.length })}>‹</button>}
         <div className="kho-anh-lightbox-photo">
           <GalleryLargeImage src={selectedImage.order.images[selectedImage.index].view_url ?? selectedImage.order.images[selectedImage.index].url} alt={selectedImage.order.images[selectedImage.index].original_name || 'Ảnh đơn hàng'}/>
@@ -212,6 +206,86 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
         </aside>
       </div>}
     </div>}
+  </section>
+}
+
+function OrderDetailPanel({ detail, invoice, onBack }: {
+  detail: { isLoading: boolean; isError: boolean; data?: OrderDetail }
+  invoice?: Invoice
+  onBack: () => void
+}) {
+  if (detail.isLoading) {
+    return <section className="kho-anh-order-detail kho-anh-order-detail-wide" onClick={event => event.stopPropagation()}>
+      <header><h2>Chi tiết đơn</h2><button type="button" className="kho-anh-lightbox-close-inline" onClick={onBack}>Quay lại ảnh</button></header>
+      <p>Đang tải đơn…</p>
+    </section>
+  }
+  if (detail.isError) {
+    return <section className="kho-anh-order-detail kho-anh-order-detail-wide" onClick={event => event.stopPropagation()}>
+      <header><h2>Chi tiết đơn</h2><button type="button" className="kho-anh-lightbox-close-inline" onClick={onBack}>Quay lại ảnh</button></header>
+      <p className="error-text">Không tải được chi tiết đơn. Vui lòng thử lại.</p>
+    </section>
+  }
+  if (!detail.data) return null
+
+  const { order, customer, warehouse, items } = detail.data
+  const totalQty = items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)
+  const totalAmount = items.reduce((sum, item) => sum + (Number(item.line_total_amount) || 0), 0)
+  const hasItems = items.length > 0
+
+  return <section className="kho-anh-order-detail kho-anh-order-detail-wide" onClick={event => event.stopPropagation()}>
+    <header>
+      <h2>Chi tiết đơn</h2>
+      <div className="kho-anh-order-detail-actions">
+        <button type="button" className="kho-anh-lightbox-close-inline" onClick={onBack}>Quay lại ảnh</button>
+      </div>
+    </header>
+
+    <div className="kho-anh-order-summary-grid">
+      <div className="kho-anh-order-summary-item"><span>Mã đơn</span><b>{order.order_no}</b></div>
+      <div className="kho-anh-order-summary-item"><span>Khách hàng</span><b>{customer.name}</b></div>
+      <div className="kho-anh-order-summary-item"><span>Kho</span><b>{warehouse.name}</b></div>
+      <div className="kho-anh-order-summary-item"><span>Loại đơn</span><b>{order.order_type === 'CUSTOMER_ORDER' ? 'Khách đặt' : 'Thường'}</b></div>
+      <div className="kho-anh-order-summary-item"><span>Ngày tạo</span><b>{formatDate(order.created_date) || order.created_date}</b></div>
+      <div className="kho-anh-order-summary-item"><span>Ngày giao</span><b>{order.delivery_date ? formatDate(order.delivery_date) : 'Chưa có'}</b></div>
+      <div className="kho-anh-order-summary-item"><span>Trạng thái</span><b>{STATUS_LABEL[order.status] ?? order.status}</b></div>
+      <div className="kho-anh-order-summary-item"><span>Người soạn</span><b>{order.claimed_by_name || '—'}</b></div>
+    </div>
+
+    {(order.customer_note || order.staff_note) && <div className="kho-anh-order-notes">
+      {order.customer_note && <div className="kho-anh-order-note"><span>Ghi chú khách</span><p>{order.customer_note}</p></div>}
+      {order.staff_note && <div className="kho-anh-order-note"><span>Ghi chú soạn</span><p>{order.staff_note}</p></div>}
+    </div>}
+
+    {invoice && <div className="kho-anh-order-invoice">
+      <div className="kho-anh-order-section-title">Hóa đơn liên quan</div>
+      <div className="kho-anh-order-invoice-head"><b>{invoice.invoice_no}</b><span className="type-badge">{invoice.status}</span></div>
+      <div className="kho-anh-order-invoice-grid">
+        <div><span>Tổng đơn hàng</span><b>{formatMoney(invoice.subtotal_amount)}</b></div>
+        <div><span>Nợ cũ</span><b>{formatMoney(invoice.debt_before_amount)}</b></div>
+        <div><span>Tổng nợ</span><b>{formatMoney(invoice.debt_after_amount)}</b></div>
+        <div><span>Còn lại phải thu</span><b>{formatMoney(invoice.balance_amount)}</b></div>
+      </div>
+    </div>}
+
+    <div className="kho-anh-order-section-title">Danh sách sản phẩm</div>
+    {hasItems ? <div className="kho-anh-order-table-wrap">
+      <table className="kho-anh-order-table">
+        <thead><tr><th>STT</th><th>Sản phẩm</th><th>Màu / size</th><th>SL</th><th>Đơn giá</th><th>Thành tiền</th></tr></thead>
+        <tbody>{items.map((item, index) => <tr key={item.id ?? index}>
+          <td>{index + 1}</td>
+          <td><b>{item.product_name}</b>{item.sales_code && <small> · {item.sales_code}</small>}{item.internal_code && <small> · {item.internal_code}</small>}{item.note && <small className="kho-anh-order-line-note"> · {item.note}</small>}</td>
+          <td>{item.color || '—'} / {item.size || '—'}</td>
+          <td>{item.quantity}</td>
+          <td>{formatMoney(item.unit_price_amount)}</td>
+          <td className="kho-anh-order-line-total">{formatMoney(item.line_total_amount ?? (Number(item.quantity) * item.unit_price_amount))}</td>
+        </tr>)}</tbody>
+        <tfoot><tr><td colSpan={3}>Tổng cộng</td><td>{totalQty}</td><td/><td className="kho-anh-order-line-total">{formatMoney(totalAmount)}</td></tr></tfoot>
+      </table>
+    </div> : <p className="muted">Đơn này hiện chưa có chi tiết sản phẩm.</p>}
+
+    {order.images.length > 0 && <div className="kho-anh-order-section-title">Ảnh liên quan ({order.images.length})</div>}
+    {order.images.length > 0 && <div className="kho-anh-order-images">{order.images.map(img => <LazyImage key={img.id} src={img.view_url ?? img.url} alt={img.original_name || 'Ảnh đơn hàng'}/>)}</div>}
   </section>
 }
 

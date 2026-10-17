@@ -61,7 +61,12 @@ export async function api<T>(path: string, opts: Options = {}): Promise<{ data: 
       window.dispatchEvent(new Event('azalas:logout'))
     }
     const err = json?.error
-    const msg = err?.message ?? (Array.isArray(json?.detail) ? 'Dữ liệu không hợp lệ.' : 'Có lỗi xảy ra, thử lại.')
+    const detail = json?.detail
+    const msg = err?.message
+      ?? (typeof detail === 'string' ? detail
+        : Array.isArray(detail)
+          ? detail.map((entry: { msg?: string }) => entry?.msg).filter(Boolean).join('; ') || 'Dữ liệu không hợp lệ.'
+          : `Lỗi máy chủ (${res.status}). Vui lòng kiểm tra log backend.`)
     throw new ApiError(res.status, err?.code ?? 'ERROR', msg, err?.details ?? {})
   }
   return json
@@ -156,6 +161,7 @@ export type Order = {
   customer_note: string | null
   staff_note: string | null
   status: string
+  claimed_by: string | null
   claimed_by_name: string | null
   picked_at: string | null
   total_amount: number
@@ -235,6 +241,7 @@ export type Overview = {
     total_orders: number
     new_orders: number
     picking_orders: number
+    picked_orders: number
     invoice_pending: number
     invoice_sent: number
     debt_orders: number
@@ -242,16 +249,17 @@ export type Overview = {
   }
   new_orders: number
   picking_orders: number
-  shipping_orders: number
-  completed_orders: number
   debt_orders: number
   recent_activity: { order_id: string; order_no: string; customer_name: string; status: string; created_at: string }[]
 }
 export type PickerStats = {
   month: string
   total: number
+  new: number
   picked: number
   picking: number
+  debt: number
+  cancelled: number
   pickers: { user_id: string; name: string; picked: number; picking: number; by_warehouse: Record<string, number>; orders: Order[] }[]
 }
 
@@ -789,6 +797,42 @@ export type InvoicePreview = {
   subtotal_amount: number; surcharge_amount: number; return_credit_amount: number
   amount_due_before_payment: number; debt_before_amount: number; debt_after_before_payment: number
   available_returns: Array<{ id: string; return_no: string; amount: number; note: string | null }>
+}
+
+export type InvoiceDraftItem = {
+  id: string; order_id: string; product_variant_id: string | null
+  name: string; sales_code: string | null; internal_code: string | null
+  color: string | null; size: string | null; quantity: number
+  unit_price_amount: number; line_total_amount: number
+}
+
+export type InvoiceDraftOrder = {
+  id: string; order_no: string; amount: number; status: string; billing_status: string
+  delivery_date: string | null; customer_note: string | null
+  images: Array<{ id: string; url: string; view_url?: string; original_name: string | null }>
+  items: InvoiceDraftItem[]
+}
+
+export type InvoiceDraft = {
+  id: string; customer_id: string; order_ids: string[]
+  customer: { id: string; customer_code: string; name: string; phone: string | null; address: string | null } | null
+  orders: InvoiceDraftOrder[]
+  subtotal_amount: number; surcharge_amount: number; return_credit_amount: number
+  amount_due_before_payment: number; debt_before_amount: number; debt_after_before_payment: number
+  old_debt_override: number | null
+  note: string | null
+  payments: Array<{ method: string; amount: number; note: string | null }>
+  capture_status: 'NONE' | 'READY' | 'STALE'
+  capture_media_id: string | null
+  captured_image: InvoiceCapture | null
+  finalized_invoice_id: string | null
+  finalized_at: string | null
+  version: number
+}
+
+export type CustomerPendingOrders = {
+  customer: { id: string; name: string; phone: string | null }
+  orders: Order[]
 }
 
 export type ReturnRecord = {

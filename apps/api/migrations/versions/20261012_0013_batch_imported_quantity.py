@@ -5,7 +5,6 @@ Revises: 20261012_0012
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "20261012_0013"
 down_revision = "20261012_0012"
@@ -14,11 +13,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "production_batches",
-        sa.Column("imported_quantity", sa.Numeric(18, 3), nullable=False, server_default="0"),
-    )
+    # production_batches.imported_quantity is created by the baseline revision
+    # 20261009_0001 via Base.metadata.create_all(checkfirst=True).
+    pass
 
 
 def downgrade() -> None:
-    op.drop_column("production_batches", "imported_quantity")
+    # The column is owned by the baseline revision; do not drop it here.
+    pass

@@ -13,13 +13,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Cho phép "điều chỉnh giảm sau kiểm đếm": received_now có thể âm để trừ bớt.
-    op.drop_constraint("ck_production_receipt_received_nonnegative", "production_receipt_lines", type_="check")
+    # The baseline revision 20261009_0001 (Base.metadata.create_all) already
+    # reflects the final state where ck_production_receipt_received_nonnegative
+    # does not exist. Nothing extra to do here.
+    pass
 
 
 def downgrade() -> None:
-    op.create_check_constraint(
-        "ck_production_receipt_received_nonnegative",
-        "production_receipt_lines",
-        "received_now >= 0",
-    )
+    # The check constraint was removed in the final model; nothing to reverse.
+    pass

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -13,7 +13,7 @@ from ..core.errors import ApiError
 from ..models import (
     AuditLog, Customer, DebtLedgerEntry, InventoryBalance, InventoryReservation,
     InventoryReservationLine, InventoryTransaction, Invoice, InvoiceCapture,
-    InvoiceOrder, MediaObject, Order, OrderItem, PartyDebtBalance, Payment,
+    InvoiceDraft, InvoiceOrder, MediaObject, Order, OrderItem, PartyDebtBalance, Payment,
     PaymentAllocation, ReturnItem, ReturnRecord, User,
 )
 from .orders import order_to_dict
@@ -23,9 +23,18 @@ ELIGIBLE_ORDER_STATUSES = {"PICKED", "SHIPPING", "COMPLETED"}
 OPEN_BILLING_STATUSES = {"DRAFT", "READY"}
 PAYMENT_METHODS = {"CASH", "BANK_TRANSFER", "RETURN_CREDIT", "OTHER"}
 
+# Múi giờ kinh doanh (Asia/Ho_Chi_Minh) dùng chung cho ledger công nợ,
+# đồng bộ với module Khách hàng / công nợ để thống kê "thay đổi trong ngày" chính xác.
+BUSINESS_TZ = timezone(timedelta(hours=7))
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _ledger_now() -> datetime:
+    """Timestamp cho DebtLedgerEntry theo múi giờ kinh doanh, giống luồng Khách hàng."""
+    return datetime.now(BUSINESS_TZ)
 
 
 def _serial(value: Decimal) -> int | float:
@@ -227,6 +236,19 @@ def close_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid.U
     preview = preview_invoice(db, customer_id=customer_id, order_ids=order_ids,
                               surcharge_amount=surcharge_amount, return_ids=return_ids,
                               expected_debt_amount=expected_debt_amount)
+    result = _finalize_invoice_core(
+        db, customer_id=customer_id, orders=orders, preview=preview,
+        surcharge_amount=surcharge_amount, return_ids=return_ids, payments=payments,
+        note=note, captured_media_id=captured_media_id, idempotency_key=idempotency_key, user=user,
+    )
+    db.commit()
+    return result
+
+
+def _finalize_invoice_core(db: Session, *, customer_id: uuid.UUID, orders: list[Order],
+                           preview: dict, surcharge_amount: int, return_ids: list[uuid.UUID],
+                           payments: list[dict], note: str | None, captured_media_id: uuid.UUID,
+                           idempotency_key: str, user: User) -> dict:
     debt_before = preview["debt_before_amount"]
 
     returns: list[ReturnRecord] = []
@@ -321,14 +343,14 @@ def close_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid.U
         party_type="CUSTOMER", party_id=customer_id, entry_type="INVOICE",
         amount_delta=invoice.subtotal_amount, reference_type="INVOICE", reference_id=invoice.id,
         description=f"Hóa đơn {invoice.invoice_no}", actor_user_id=user.id,
-        idempotency_key=f"{idempotency_key}:debt:invoice",
+        idempotency_key=f"{idempotency_key}:debt:invoice", occurred_at=_ledger_now(),
     ))
     if surcharge_amount:
         db.add(DebtLedgerEntry(
             party_type="CUSTOMER", party_id=customer_id, entry_type="SURCHARGE",
             amount_delta=surcharge_amount, reference_type="INVOICE", reference_id=invoice.id,
             description=f"Cộng thêm {invoice.invoice_no}", actor_user_id=user.id,
-            idempotency_key=f"{idempotency_key}:debt:surcharge",
+            idempotency_key=f"{idempotency_key}:debt:surcharge", occurred_at=_ledger_now(),
         ))
     return_payment_snapshots = []
     if invoice.return_credit_amount:
@@ -336,7 +358,7 @@ def close_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid.U
             party_type="CUSTOMER", party_id=customer_id, entry_type="RETURN_CREDIT",
             amount_delta=-invoice.return_credit_amount, reference_type="INVOICE", reference_id=invoice.id,
             description=f"Hàng trả trừ hóa đơn {invoice.invoice_no}", actor_user_id=user.id,
-            idempotency_key=f"{idempotency_key}:debt:return",
+            idempotency_key=f"{idempotency_key}:debt:return", occurred_at=_ledger_now(),
         ))
         for row in returns:
             return_payment = Payment(
@@ -390,7 +412,7 @@ def close_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid.U
             party_type="CUSTOMER", party_id=customer_id, entry_type="PAYMENT",
             amount_delta=-amount, reference_type="PAYMENT", reference_id=payment.id,
             description=f"Thanh toán {invoice.invoice_no}", actor_user_id=user.id,
-            idempotency_key=f"{idempotency_key}:debt:payment:{index}",
+            idempotency_key=f"{idempotency_key}:debt:payment:{index}", occurred_at=_ledger_now(),
         ))
         payment_snapshots.append({"payment_id": str(payment.id), "payment_no": payment.payment_no,
                                   "method": method, "amount": amount, "allocated_amount": allocation,
@@ -427,7 +449,14 @@ def close_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid.U
     audit(db, module="INVOICE", action="CLOSE", entity_type="INVOICE", entity_id=invoice.id,
           actor=user, after={"invoice_no": invoice.invoice_no, "total": invoice.subtotal_amount,
                              "status": invoice.status}, request_id=idempotency_key)
-    db.commit()
+    # Audit công nợ đồng bộ với module Khách hàng / công nợ: ghi before/after/delta.
+    audit(db, module="DEBT", action="INVOICE_FINALIZE", entity_type="CUSTOMER", entity_id=customer_id,
+          actor=user, before={"balance": debt_before},
+          after={"balance": invoice.debt_after_amount,
+                 "delta": invoice.debt_after_amount - debt_before,
+                 "invoice_no": invoice.invoice_no},
+          request_id=idempotency_key)
+    db.flush()
     return _invoice_dict(invoice, db)
 
 
@@ -765,6 +794,298 @@ def get_invoice_capture(db: Session, *, customer_id: uuid.UUID, order_ids: list[
         "url": media_view_url(media.id), "view_url": media_view_url(media.id), "original_name": media.original_name,
         "content_type": media.content_type,
     }
+
+
+_UNSET = object()
+
+
+def _build_draft_snapshot(db: Session, customer: Customer, orders: list[Order],
+                          old_debt_override: int | None, surcharge_amount: int) -> dict:
+    debt_before = old_debt_override if old_debt_override is not None else debt_total(db, customer.id)
+    order_rows = []
+    subtotal = 0
+    for order in orders:
+        items = _active_items(db, order.id)
+        amount = sum(item.line_total_amount for item in items)
+        subtotal += amount
+        order_rows.append({
+            "id": str(order.id), "order_no": order.order_no, "amount": amount,
+            "status": order.status, "billing_status": order.billing_status,
+            "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None,
+            "customer_note": order.customer_note,
+            "images": [{"id": str(m.id), "url": media_view_url(m.id), "view_url": media_view_url(m.id),
+                        "original_name": m.original_name} for m in order.media],
+            "items": [{
+                "id": str(item.id), "order_id": str(order.id),
+                "product_variant_id": str(item.product_variant_id) if item.product_variant_id else None,
+                "name": item.product_name_snapshot, "sales_code": item.sales_code_snapshot,
+                "internal_code": item.internal_code_snapshot, "color": item.color_snapshot,
+                "size": item.size_snapshot, "quantity": _serial(item.quantity),
+                "unit_price_amount": item.unit_price_amount, "line_total_amount": item.line_total_amount,
+            } for item in items],
+        })
+    return {
+        "customer": {"id": str(customer.id), "customer_code": customer.customer_code, "name": customer.name,
+                     "phone": customer.phone, "address": customer.address},
+        "orders": order_rows, "subtotal_amount": subtotal, "surcharge_amount": surcharge_amount,
+        "return_credit_amount": 0, "amount_due_before_payment": max(subtotal + surcharge_amount, 0),
+        "debt_before_amount": debt_before,
+        "debt_after_before_payment": debt_before + subtotal + surcharge_amount,
+        "available_returns": [],
+    }
+
+
+def _recompute_snapshot_totals(snapshot: dict, surcharge_amount: int, debt_before: int) -> None:
+    subtotal = 0
+    for order in snapshot.get("orders", []):
+        amount = 0
+        for item in order.get("items", []):
+            amount += int(item.get("line_total_amount", 0) or 0)
+        order["amount"] = amount
+        subtotal += amount
+    snapshot["subtotal_amount"] = subtotal
+    snapshot["surcharge_amount"] = surcharge_amount
+    snapshot["amount_due_before_payment"] = max(subtotal + surcharge_amount, 0)
+    snapshot["debt_before_amount"] = debt_before
+    snapshot["debt_after_before_payment"] = debt_before + subtotal + surcharge_amount
+
+
+def _draft_dict(draft: InvoiceDraft, db: Session) -> dict:
+    captured_image = None
+    if draft.capture_media_id:
+        media = db.get(MediaObject, draft.capture_media_id)
+        if media:
+            captured_image = {
+                "id": str(media.id), "url": media_view_url(media.id), "view_url": media_view_url(media.id),
+                "original_name": media.original_name, "content_type": media.content_type,
+            }
+    snapshot = draft.snapshot or {}
+    return {
+        "id": str(draft.id), "customer_id": str(draft.customer_id),
+        "order_ids": [str(x) for x in (draft.order_ids or [])],
+        "customer": snapshot.get("customer"),
+        "orders": snapshot.get("orders", []),
+        "subtotal_amount": snapshot.get("subtotal_amount", 0),
+        "surcharge_amount": draft.surcharge_amount,
+        "return_credit_amount": snapshot.get("return_credit_amount", 0),
+        "amount_due_before_payment": snapshot.get("amount_due_before_payment", 0),
+        "debt_before_amount": snapshot.get("debt_before_amount", 0),
+        "debt_after_before_payment": snapshot.get("debt_after_before_payment", 0),
+        "old_debt_override": draft.old_debt_override,
+        "note": draft.note,
+        "payments": draft.payments or [],
+        "capture_status": draft.capture_status,
+        "capture_media_id": str(draft.capture_media_id) if draft.capture_media_id else None,
+        "captured_image": captured_image,
+        "finalized_invoice_id": str(draft.finalized_invoice_id) if draft.finalized_invoice_id else None,
+        "finalized_at": draft.finalized_at.isoformat() if draft.finalized_at else None,
+        "version": draft.version,
+    }
+
+
+def customer_pending_orders(db: Session, *, customer_id: uuid.UUID) -> dict:
+    customer = db.get(Customer, customer_id)
+    if not customer or customer.deleted_at:
+        raise ApiError(404, "CUSTOMER_NOT_FOUND", "Không tìm thấy khách hàng.")
+    orders = list(db.scalars(_pending_orders_stmt().where(
+        Order.customer_id == customer_id
+    ).order_by(Order.created_at)).unique())
+    invoiced = set(db.scalars(select(InvoiceOrder.order_id)))
+    pending = [o for o in orders if o.id not in invoiced]
+    counts = dict(db.execute(
+        select(OrderItem.order_id, func.count(OrderItem.id))
+        .where(OrderItem.active.is_(True), OrderItem.order_id.in_([o.id for o in pending]))
+        .group_by(OrderItem.order_id)
+    ).all()) if pending else {}
+    rows = []
+    for order in pending:
+        data = order_to_dict(order)
+        data["has_active_items"] = counts.get(order.id, 0) > 0
+        rows.append(data)
+    return {"customer": {"id": str(customer.id), "name": customer.name, "phone": customer.phone}, "orders": rows}
+
+
+def draft_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid.UUID], user: User) -> dict:
+    customer = db.scalar(select(Customer).where(Customer.id == customer_id).with_for_update(of=Customer))
+    if not customer or customer.deleted_at:
+        raise ApiError(404, "CUSTOMER_NOT_FOUND", "Không tìm thấy khách hàng.")
+    orders = _validate_orders(db, customer_id, order_ids, lock=True)
+    snapshot = _build_draft_snapshot(db, customer, orders, None, 0)
+    draft = InvoiceDraft(
+        customer_id=customer_id, order_ids=[str(o.id) for o in orders], snapshot=snapshot,
+        note=None, payments=[], old_debt_override=None, surcharge_amount=0,
+        capture_status="NONE", created_by=user.id, version=1,
+    )
+    db.add(draft)
+    db.flush()
+    audit(db, module="INVOICE", action="CREATE_DRAFT", entity_type="INVOICE_DRAFT", entity_id=draft.id,
+          actor=user, after={"customer_id": str(customer_id), "order_ids": [str(o.id) for o in orders]})
+    db.commit()
+    return _draft_dict(draft, db)
+
+
+def get_invoice_draft(db: Session, *, draft_id: uuid.UUID) -> dict:
+    draft = db.get(InvoiceDraft, draft_id)
+    if not draft:
+        raise ApiError(404, "INVOICE_DRAFT_NOT_FOUND", "Không tìm thấy hóa đơn nháp.")
+    return _draft_dict(draft, db)
+
+
+def update_invoice_draft(db: Session, *, draft_id: uuid.UUID, items: list[dict] | None = None,
+                         old_debt_override: int | None = None, old_debt_set: bool = False,
+                         surcharge_amount: int | None = None, note: str | None = None,
+                         payments: list[dict] | None = None, user: User) -> dict:
+    draft = db.scalar(select(InvoiceDraft).where(InvoiceDraft.id == draft_id).with_for_update(of=InvoiceDraft))
+    if not draft:
+        raise ApiError(404, "INVOICE_DRAFT_NOT_FOUND", "Không tìm thấy hóa đơn nháp.")
+    if draft.finalized_invoice_id:
+        raise ApiError(409, "INVOICE_DRAFT_FINALIZED", "Hóa đơn nháp đã được chốt.")
+    snapshot = dict(draft.snapshot or {})
+    changed_money = False
+    before = {"version": draft.version}
+
+    if items is not None:
+        changed_money = True
+        for raw in items:
+            order_id = str(raw.get("order_id") or "")
+            item_id = str(raw.get("item_id") or "")
+            found = None
+            for order in snapshot.get("orders", []):
+                if order.get("id") != order_id:
+                    continue
+                for item in order.get("items", []):
+                    if item.get("id") == item_id:
+                        found = item
+                        break
+                if found:
+                    break
+            if found is None:
+                raise ApiError(404, "INVOICE_ITEM_NOT_FOUND", "Không tìm thấy dòng sản phẩm để sửa.")
+            if raw.get("quantity") is not None:
+                qty = Decimal(str(raw["quantity"]))
+                if qty < 0:
+                    raise ApiError(422, "INVALID_QUANTITY", "Số lượng không được âm.")
+                found["quantity"] = _serial(qty)
+            if raw.get("unit_price_amount") is not None:
+                price = int(raw["unit_price_amount"])
+                if price < 0:
+                    raise ApiError(422, "INVALID_PRICE", "Đơn giá không được âm.")
+                found["unit_price_amount"] = price
+            line = Decimal(str(found.get("quantity", 0))) * int(found.get("unit_price_amount", 0))
+            if line != line.to_integral_value():
+                raise ApiError(422, "MONEY_FRACTION", "Thành tiền phải là số VND nguyên.")
+            found["line_total_amount"] = int(line)
+        _recompute_snapshot_totals(snapshot, draft.surcharge_amount, snapshot.get("debt_before_amount", 0))
+
+    if surcharge_amount is not None:
+        if surcharge_amount < 0:
+            raise ApiError(422, "INVALID_SURCHARGE", "Khoản cộng thêm không được âm.")
+        draft.surcharge_amount = int(surcharge_amount)
+        changed_money = True
+        _recompute_snapshot_totals(snapshot, draft.surcharge_amount, snapshot.get("debt_before_amount", 0))
+
+    if old_debt_set:
+        draft.old_debt_override = int(old_debt_override) if old_debt_override is not None else None
+        changed_money = True
+        debt_before = draft.old_debt_override if draft.old_debt_override is not None else debt_total(db, draft.customer_id)
+        _recompute_snapshot_totals(snapshot, draft.surcharge_amount, debt_before)
+
+    if note is not None:
+        draft.note = (note or "").strip() or None
+
+    if payments is not None:
+        normalized = []
+        for raw in payments or []:
+            amount = int(raw.get("amount") or 0)
+            method = str(raw.get("method") or "").upper()
+            if amount <= 0 or method not in PAYMENT_METHODS or method == "RETURN_CREDIT":
+                raise ApiError(422, "INVALID_PAYMENT", "Dòng thanh toán không hợp lệ.")
+            normalized.append({"method": method, "amount": amount,
+                               "note": (raw.get("note") or "").strip() or None})
+        draft.payments = normalized
+        changed_money = True
+
+    if changed_money and draft.capture_status == "READY":
+        draft.capture_status = "STALE"
+
+    draft.snapshot = snapshot
+    draft.version += 1
+    db.flush()
+    audit(db, module="INVOICE", action="UPDATE_DRAFT", entity_type="INVOICE_DRAFT", entity_id=draft.id,
+          actor=user, before=before, after={"version": draft.version, "changed_money": changed_money})
+    db.commit()
+    return _draft_dict(draft, db)
+
+
+def capture_invoice_draft(db: Session, *, draft_id: uuid.UUID, media_id: uuid.UUID, user: User) -> dict:
+    draft = db.scalar(select(InvoiceDraft).where(InvoiceDraft.id == draft_id).with_for_update(of=InvoiceDraft))
+    if not draft:
+        raise ApiError(404, "INVOICE_DRAFT_NOT_FOUND", "Không tìm thấy hóa đơn nháp.")
+    if draft.finalized_invoice_id:
+        raise ApiError(409, "INVOICE_DRAFT_FINALIZED", "Hóa đơn nháp đã được chốt.")
+    media = db.get(MediaObject, media_id)
+    if not media:
+        raise ApiError(422, "MEDIA_NOT_FOUND", "Ảnh hóa đơn không hợp lệ.")
+    draft.capture_media_id = media_id
+    draft.capture_status = "READY"
+    draft.version += 1
+    db.flush()
+    audit(db, module="INVOICE", action="CAPTURE_DRAFT", entity_type="INVOICE_DRAFT", entity_id=draft.id,
+          actor=user, after={"media_id": str(media_id)})
+    db.commit()
+    return _draft_dict(draft, db)
+
+
+def finalize_invoice_draft(db: Session, *, draft_id: uuid.UUID, idempotency_key: str, user: User) -> dict:
+    draft = db.scalar(select(InvoiceDraft).where(InvoiceDraft.id == draft_id).with_for_update(of=InvoiceDraft))
+    if not draft:
+        raise ApiError(404, "INVOICE_DRAFT_NOT_FOUND", "Không tìm thấy hóa đơn nháp.")
+    if draft.finalized_invoice_id:
+        invoice = db.get(Invoice, draft.finalized_invoice_id)
+        if invoice:
+            return _invoice_dict(invoice, db)
+        raise ApiError(409, "INVOICE_DRAFT_FINALIZED", "Hóa đơn nháp đã được chốt.")
+    if not idempotency_key:
+        raise ApiError(422, "IDEMPOTENCY_KEY_REQUIRED", "Thiếu Idempotency-Key.")
+    if draft.capture_status != "READY" or not draft.capture_media_id:
+        raise ApiError(409, "INVOICE_CAPTURE_REQUIRED",
+                       "Vui lòng chụp ảnh hóa đơn trước khi xác nhận & chốt nợ.")
+    customer_id = draft.customer_id
+    order_ids = [uuid.UUID(x) for x in (draft.order_ids or [])]
+    customer = db.scalar(select(Customer).where(Customer.id == customer_id).with_for_update(of=Customer))
+    if not customer:
+        raise ApiError(404, "CUSTOMER_NOT_FOUND", "Không tìm thấy khách hàng.")
+    orders = _validate_orders(db, customer_id, order_ids, lock=True)
+
+    snapshot = dict(draft.snapshot or {})
+    actual_debt = debt_total(db, customer_id)
+    override = draft.old_debt_override
+    debt_before = actual_debt
+    if override is not None and abs(override - actual_debt) > settings.money_rounding_tolerance_vnd:
+        db.add(DebtLedgerEntry(
+            party_type="CUSTOMER", party_id=customer_id, entry_type="ADJUSTMENT",
+            amount_delta=override - actual_debt, reference_type="INVOICE", reference_id=draft.id,
+            description="Điều chỉnh nợ cũ khi chốt hóa đơn", actor_user_id=user.id,
+            idempotency_key=f"{idempotency_key}:debt:adjustment", occurred_at=_ledger_now(),
+        ))
+        db.flush()
+        debt_before = override
+    snapshot["debt_before_amount"] = debt_before
+    snapshot["debt_after_before_payment"] = debt_before + int(snapshot.get("subtotal_amount", 0) or 0) + draft.surcharge_amount
+
+    invoice_dict = _finalize_invoice_core(
+        db, customer_id=customer_id, orders=orders, preview=snapshot,
+        surcharge_amount=draft.surcharge_amount, return_ids=[],
+        payments=draft.payments or [], note=draft.note,
+        captured_media_id=draft.capture_media_id, idempotency_key=idempotency_key, user=user,
+    )
+    draft.finalized_invoice_id = uuid.UUID(invoice_dict["id"])
+    draft.finalized_at = _now()
+    draft.version += 1
+    audit(db, module="INVOICE", action="FINALIZE_DRAFT", entity_type="INVOICE_DRAFT", entity_id=draft.id,
+          actor=user, after={"invoice_id": invoice_dict["id"]}, request_id=idempotency_key)
+    db.commit()
+    return invoice_dict
 
 
 def delete_pending_orders(db: Session, *, order_ids: list[uuid.UUID], user: User) -> dict:

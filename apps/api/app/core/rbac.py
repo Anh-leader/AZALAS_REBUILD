@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from ..models import Permission, Role, RolePermission, User, UserRole
 
 ALL_PERMISSIONS = {
-    "sales.view", "sales.create", "sales.pick", "sales.ship", "sales.invoice", "sales.returns", "sales.debt.adjust",
+    "sales.view", "sales.create", "sales.pick", "sales.ship", "sales.invoice", "sales.returns", "sales.debt.adjust", "order.delete",
     "production.view", "production.manage", "production.settle", "materials.view", "materials.manage", "materials.settle",
     "hr.view", "hr.manage", "hr.payroll.approve", "reports.view", "reports.picker", "reports.audit",
     "admin.users", "admin.roles",

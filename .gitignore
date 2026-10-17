@@ -17,3 +17,18 @@ apps/api/uploads/
 apps/api/uploads_test/
 
 *.log
+
+# Database dumps / generated migration reports (not source)
+supabase_clone_backup/
+apps/api/migration_reports/
+
+# One-off diagnostic scripts
+apps/api/check_alembic.py
+apps/api/check_media_status.py
+apps/api/count_old_tables.py
+apps/api/inspect_old_freshness.py
+apps/api/inspect_old_schema.py
+apps/api/list_old_tables.py
+apps/api/reset_new_for_current_app.py
+apps/api/show_failed_media.py
+apps/api/show_pending_media.py

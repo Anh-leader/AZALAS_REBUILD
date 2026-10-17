@@ -5,22 +5,19 @@ Revises: 20261010_0009
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "20261011_0010"
 down_revision = "20261010_0009"
 branch_labels = None
 depends_on = None
-UUID = sa.Uuid
 
 
 def upgrade() -> None:
-    op.create_table(
-        "production_batch_media",
-        sa.Column("batch_id", UUID(), sa.ForeignKey("production_batches.id", ondelete="CASCADE"), primary_key=True),
-        sa.Column("media_id", UUID(), sa.ForeignKey("media_objects.id", ondelete="CASCADE"), primary_key=True),
-    )
+    # production_batch_media is created by the baseline revision 20261009_0001
+    # via Base.metadata.create_all(checkfirst=True). Nothing extra to do here.
+    pass
 
 
 def downgrade() -> None:
-    op.drop_table("production_batch_media")
+    # The table is owned by the baseline revision; do not drop it here.
+    pass

@@ -2,10 +2,15 @@ import uuid
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.text import fold
-from app.models import AuditLog, Customer, DebtLedgerEntry, Invoice, InvoiceOrder, Order, OrderGroup, OrderStatusEvent, Partner, Payment, User, Warehouse
+from app.models import (
+    AuditLog, Customer, DebtLedgerEntry, InventoryBalance, InventoryReservation,
+    InventoryReservationLine, Invoice, InvoiceOrder, MediaObject, Order, OrderGroup,
+    OrderItem, OrderItemRevision, OrderMedia, OrderStatusEvent, Partner, Payment,
+    ProductVariant, User, Warehouse,
+)
 from app.services.orders import generate_order_no
 
 
@@ -277,7 +282,8 @@ def test_picker_statistics_owner_only(client, owner, picker):
     r = client.get("/api/v1/picker-statistics", headers=owner)
     assert r.status_code == 200
     d = r.json()["data"]
-    assert d["total"] == d["picked"] + d["picking"]
+    # Tổng = Chưa soạn + Đang soạn + Đã soạn + Nợ + Hủy (không bỏ sót đơn chưa claim).
+    assert d["total"] == d["new"] + d["picked"] + d["picking"] + d["debt"] + d["cancelled"]
 
 
 def test_dashboard(client, owner):
@@ -442,6 +448,7 @@ def test_dashboard_empty_period_returns_zero_counts_and_cashflow(client, owner):
         "total_orders": 0,
         "new_orders": 0,
         "picking_orders": 0,
+        "picked_orders": 0,
         "invoice_pending": 0,
         "invoice_sent": 0,
         "debt_orders": 0,
@@ -490,3 +497,191 @@ def test_upload_then_create_order_keeps_image(client, owner, db):
     detail = client.get(f"/api/v1/orders/{order['id']}", headers=owner)
     assert detail.status_code == 200
     assert detail.json()["data"]["order"]["images"] == order["images"]
+
+
+# ---- Order deletion ----
+
+def _tx_warehouse_id(db):
+    return str(db.scalar(select(Warehouse.id).where(Warehouse.code == "TAN_XUAN")))
+
+
+def _demo_variant_id(db, internal_code="DEMO-NB-DEN-M"):
+    return str(db.scalar(select(ProductVariant.id).where(ProductVariant.internal_code == internal_code)))
+
+
+def _create_new_order(client, owner, db, warehouse_mode="TAN_XUAN"):
+    body = {
+        "customer_id": _customer_id(db),
+        "warehouse_mode": warehouse_mode,
+        "created_date": date.today().isoformat(),
+        "is_urgent": False,
+    }
+    r = client.post("/api/v1/orders", json=body, headers=owner | {"Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 201, r.text
+    return r.json()["data"][0]
+
+
+def _pick_order(client, owner, db, order_id):
+    """Claim rồi lưu soạn để tạo reservation, trả về order_id ở trạng thái PICKED."""
+    claimed = client.post(f"/api/v1/orders/{order_id}/claim", headers=owner)
+    assert claimed.status_code == 200, claimed.text
+    detail = client.get(f"/api/v1/orders/{order_id}", headers=owner).json()["data"]
+    variant_id = _demo_variant_id(db)
+    warehouse_id = _tx_warehouse_id(db)
+    saved = client.put(f"/api/v1/orders/{order_id}/pick", headers=owner, json={
+        "order_id": order_id,
+        "version": detail["order"]["version"],
+        "staff_note": None,
+        "items": [{
+            "product_variant_id": variant_id,
+            "product_name": "Quần thể thao demo Đen M",
+            "warehouse_id": warehouse_id,
+            "quantity": 2,
+            "unit_price_amount": 100000,
+            "sale_type": "MaBanHang",
+        }],
+    })
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["data"]["order"]["status"] == "PICKED"
+    return variant_id, warehouse_id
+
+
+def test_delete_new_order_succeeds(client, owner, db):
+    order = _create_new_order(client, owner, db)
+    order_id = uuid.UUID(order["id"])
+    r = client.delete(f"/api/v1/orders/{order['id']}", headers=owner)
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["ok"] is True
+    assert data["order_id"] == order["id"]
+    assert data["released_reservations"] == 0
+    assert data["deleted_media_links"] == 0
+    assert db.get(Order, order_id) is None
+    assert db.scalar(select(OrderStatusEvent.id).where(OrderStatusEvent.order_id == order_id)) is None
+    assert db.scalar(select(AuditLog.id).where(AuditLog.entity_id == order_id, AuditLog.action == "DELETE_ORDER")) is not None
+
+
+def test_delete_picking_order_releases_claim(client, owner, db):
+    order = _create_new_order(client, owner, db)
+    order_id = uuid.UUID(order["id"])
+    claimed = client.post(f"/api/v1/orders/{order['id']}/claim", headers=owner)
+    assert claimed.json()["data"]["status"] == "PICKING"
+    r = client.delete(f"/api/v1/orders/{order['id']}", headers=owner)
+    assert r.status_code == 200, r.text
+    assert db.get(Order, order_id) is None
+    assert db.scalar(select(OrderStatusEvent.id).where(OrderStatusEvent.order_id == order_id)) is None
+
+
+def test_delete_picked_order_releases_reservation(client, owner, db):
+    order = _create_new_order(client, owner, db)
+    order_id = uuid.UUID(order["id"])
+    variant_id, warehouse_id = _pick_order(client, owner, db, order["id"])
+
+    balance = db.scalar(select(InventoryBalance).where(
+        InventoryBalance.variant_id == uuid.UUID(variant_id),
+        InventoryBalance.warehouse_id == uuid.UUID(warehouse_id),
+    ))
+    assert balance.reserved == 2
+
+    r = client.delete(f"/api/v1/orders/{order['id']}", headers=owner)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["released_reservations"] == 1
+    db.expire_all()
+    assert db.scalar(select(InventoryBalance.reserved).where(
+        InventoryBalance.variant_id == uuid.UUID(variant_id),
+        InventoryBalance.warehouse_id == uuid.UUID(warehouse_id),
+    )) == 0
+    assert db.get(Order, order_id) is None
+    assert db.scalar(select(InventoryReservation.id).where(InventoryReservation.order_id == order_id)) is None
+
+
+def test_delete_order_with_invoice_conflicts(client, owner, db):
+    order = _create_new_order(client, owner, db)
+    order_id = uuid.UUID(order["id"])
+    customer_id = uuid.UUID(_customer_id(db))
+    invoice = Invoice(invoice_no="HD-DEL-TEST", customer_id=customer_id, status="SENT",
+                      subtotal_amount=1000, snapshot={}, idempotency_key="test-del-inv")
+    db.add(invoice); db.flush()
+    db.add(InvoiceOrder(invoice_id=invoice.id, order_id=order_id, amount=1000))
+    db.add(DebtLedgerEntry(party_type="CUSTOMER", party_id=customer_id, entry_type="INVOICE",
+                           amount_delta=1000, reference_type="INVOICE", reference_id=invoice.id))
+    db.commit()
+
+    r = client.delete(f"/api/v1/orders/{order['id']}", headers=owner)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "ORDER_HAS_INVOICE"
+    assert db.get(Order, order_id) is not None
+
+
+def test_delete_order_forbidden_for_non_owner(client, owner, picker, db):
+    order = _create_new_order(client, owner, db)
+    order_id = uuid.UUID(order["id"])
+    r = client.delete(f"/api/v1/orders/{order['id']}", headers=picker)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN"
+    assert db.get(Order, order_id) is not None
+
+
+def test_delete_order_twice_returns_not_found(client, owner, db):
+    order = _create_new_order(client, owner, db)
+    assert client.delete(f"/api/v1/orders/{order['id']}", headers=owner).status_code == 200
+    r = client.delete(f"/api/v1/orders/{order['id']}", headers=owner)
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "ORDER_NOT_FOUND"
+
+
+def test_delete_order_rolls_back_when_balance_missing(client, owner, db):
+    order = _create_new_order(client, owner, db)
+    order_id = uuid.UUID(order["id"])
+    variant_id, warehouse_id = _pick_order(client, owner, db, order["id"])
+    # Phá vỡ tồn kho để buộc cleanup fail, kiểm tra rollback giữ nguyên đơn.
+    db.execute(delete(InventoryBalance).where(
+        InventoryBalance.variant_id == uuid.UUID(variant_id),
+        InventoryBalance.warehouse_id == uuid.UUID(warehouse_id),
+    ))
+    db.commit()
+
+    r = client.delete(f"/api/v1/orders/{order['id']}", headers=owner)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "RESERVATION_BALANCE_MISSING"
+    assert db.get(Order, order_id) is not None
+    assert db.scalar(select(InventoryReservation.id).where(InventoryReservation.order_id == order_id)) is not None
+
+
+def test_delete_order_cleans_orphan_group_but_keeps_shared(client, owner, db):
+    body = {
+        "customer_id": _customer_id(db),
+        "warehouse_mode": "BOTH",
+        "created_date": date.today().isoformat(),
+    }
+    r = client.post("/api/v1/orders", json=body, headers=owner | {"Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 201, r.text
+    orders = r.json()["data"]
+    assert len(orders) == 2
+    group_id = uuid.UUID(orders[0]["order_group_id"])
+    assert db.get(OrderGroup, group_id) is not None
+
+    assert client.delete(f"/api/v1/orders/{orders[0]['id']}", headers=owner).status_code == 200
+    assert db.get(OrderGroup, group_id) is not None
+
+    assert client.delete(f"/api/v1/orders/{orders[1]['id']}", headers=owner).status_code == 200
+    assert db.get(OrderGroup, group_id) is None
+
+
+def test_delete_order_removes_links_but_keeps_shared_media(client, owner, db):
+    media = MediaObject(storage_provider="local", storage="LOCAL", object_key="test-key",
+                        content_type="image/png", size_bytes=10, sha256="abc", checksum="abc", status="READY")
+    db.add(media); db.commit()
+    order1 = _create_new_order(client, owner, db)
+    order2 = _create_new_order(client, owner, db)
+    db.add(OrderMedia(order_id=uuid.UUID(order1["id"]), media_id=media.id))
+    db.add(OrderMedia(order_id=uuid.UUID(order2["id"]), media_id=media.id))
+    db.commit()
+
+    r = client.delete(f"/api/v1/orders/{order1['id']}", headers=owner)
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["deleted_media_links"] == 1
+    assert db.get(MediaObject, media.id) is not None
+    assert db.scalar(select(OrderMedia).where(
+        OrderMedia.order_id == uuid.UUID(order2["id"]), OrderMedia.media_id == media.id
+    )) is not None

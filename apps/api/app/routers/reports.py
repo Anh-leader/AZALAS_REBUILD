@@ -13,11 +13,10 @@ from ..core.rbac import access_for_user
 from ..models import (AuditLog, Customer, DebtLedgerEntry, InventoryBalance, Invoice, InvoiceOrder,
                       Order, OrderStatusEvent, PartyDebtBalance, Payment, User)
 from ..services.orders import order_to_dict
+from ..services.order_metrics import BUSINESS_TZ, PICKED_STATUSES, order_metrics
 
 router = APIRouter(tags=["reports"], dependencies=[Depends(require_permission("reports.view"))])
-BUSINESS_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 INVOICE_REVENUE_STATUSES = ("SENT", "PAID", "PARTIALLY_PAID")
-INVOICE_PENDING_ORDER_STATUSES = ("PICKED", "SHIPPING", "COMPLETED")
 
 
 def report_period(date_from: date | None, date_to: date | None) -> tuple[date, date, datetime, datetime]:
@@ -284,27 +283,14 @@ def reports_overview(
     user: User = Depends(current_user),
 ):
     first, last, start_at, end_at = report_period(from_date, to_date)
-    status_rows = db.execute(
-        select(Order.status, func.count(Order.id))
-        .where(Order.created_date.between(first, last))
-        .group_by(Order.status)
-    ).all()
-    order_statuses = {status: int(count) for status, count in status_rows}
-    total_orders = sum(order_statuses.values())
-    invoice_pending = int(db.scalar(
-        select(func.count(Order.id)).where(
-            Order.created_date.between(first, last),
-            Order.status.in_(INVOICE_PENDING_ORDER_STATUSES),
-            Order.billing_status.in_(("DRAFT", "READY")),
-            ~select(InvoiceOrder.id).where(InvoiceOrder.order_id == Order.id).exists(),
-        )
-    ) or 0)
-    cancelled_orders = int(db.scalar(
-        select(func.count(Order.id)).where(
-            Order.created_date.between(first, last),
-            (Order.status.in_(("CANCELLED", "DELETED")) | (Order.billing_status == "DELETED")),
-        )
-    ) or 0)
+    metrics = order_metrics(db, date_from=first, date_to=last)
+    total_orders = metrics["total"]
+    new_orders = metrics["new"]
+    picking_orders = metrics["picking"]
+    picked_orders = metrics["picked"]
+    invoice_pending = metrics["invoice_pending"]
+    debt_orders = metrics["debt"]
+    cancelled_orders = metrics["cancelled"]
     invoice_revenue = int(db.scalar(
         select(func.coalesce(func.sum(Invoice.subtotal_amount + Invoice.surcharge_amount), 0))
         .where(
@@ -352,11 +338,11 @@ def reports_overview(
         "cashflow": cashflow,
         "orders": {
             "total_orders": total_orders,
-            "new_orders": order_statuses.get("NEW", 0),
-            "picking_orders": order_statuses.get("PICKING", 0),
-            "picked_orders": order_statuses.get("PICKED", 0),
+            "new_orders": new_orders,
+            "picking_orders": picking_orders,
+            "picked_orders": picked_orders,
             "invoice_pending": invoice_pending,
-            "debt_orders": order_statuses.get("DEBT_ORDER", 0),
+            "debt_orders": debt_orders,
             "cancelled_orders": cancelled_orders,
         },
     }}
@@ -378,7 +364,7 @@ def report_action_items(
         select(Order)
         .where(
             Order.created_date.between(first, last),
-            Order.status.in_(INVOICE_PENDING_ORDER_STATUSES),
+            Order.status.in_(PICKED_STATUSES),
             Order.billing_status.in_(("DRAFT", "READY")),
             pending_invoice,
         )

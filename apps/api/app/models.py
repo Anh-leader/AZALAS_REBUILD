@@ -397,6 +397,26 @@ class InvoiceCapture(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class InvoiceDraft(TimestampMixin, Base):
+    """Hóa đơn nháp: tách bước chọn đơn -> xem/sửa -> chụp -> chốt hóa đơn."""
+
+    __tablename__ = "invoice_drafts"
+    id: Mapped[uuid.UUID] = uid()
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id", ondelete="RESTRICT"), index=True)
+    order_ids: Mapped[list] = mapped_column(JSON, default=list)
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    note: Mapped[str | None] = mapped_column(Text)
+    payments: Mapped[list] = mapped_column(JSON, default=list)
+    old_debt_override: Mapped[int | None] = mapped_column(BigInteger)
+    surcharge_amount: Mapped[int] = mapped_column(BigInteger, default=0)
+    capture_media_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media_objects.id", ondelete="SET NULL"))
+    capture_status: Mapped[str] = mapped_column(String(20), default="NONE")
+    finalized_invoice_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("invoices.id", ondelete="SET NULL"))
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class InvoiceOrder(Base):
     __tablename__ = "invoice_orders"
     __table_args__ = (UniqueConstraint("order_id", name="uq_invoice_order_order"),)

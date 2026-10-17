@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, STATUS_LABEL, type Customer, type CustomerDebtChange, type Order, type Overview, type QueueSection, type QueueTab, type User } from './api/client'
+import { Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { api, ApiError, STATUS_LABEL, type Customer, type CustomerDebtChange, type Order, type OrderDetail, type Overview, type QueueSection, type QueueTab, type User } from './api/client'
 import { uploadMediaFile } from './api/media'
 import { useAuth } from './api/auth'
 import { formatDate, formatDateShort, formatMoney, parseMoneyInput, todayIso, todayLabel } from './lib/format'
@@ -8,8 +9,10 @@ import { PickWorkspace } from './components/PickWorkspace'
 import { PickerStatistics } from './components/PickerStatistics'
 import { ReturnsPage, ShippingPage } from './components/SalesPages'
 import { InvoicePage } from './components/InvoiceCenter'
+import { InvoiceDetailPage, InvoiceGroupPage } from './components/InvoicePages'
 import { OrderImages } from './components/OrderImages'
 import { OrderImagePasteArea, type PendingOrderImage } from './components/OrderImagePasteArea'
+import { CustomerCombobox } from './components/CustomerCombobox'
 import { RecentImagesPage } from './components/RecentImagesPage'
 import { ProductionPage } from './components/ProductionPage'
 import { MaterialsPage } from './components/MaterialsPage'
@@ -18,6 +21,12 @@ import { AccountPage, AdminPage } from './components/AdminPage'
 import type { DebtStatement } from './api/client'
 
 export type Page = 'dashboard' | 'orders' | 'create' | 'shipping' | 'invoices' | 'returns' | 'images' | 'customers' | 'production' | 'materials' | 'hr' | 'reports' | 'admin' | 'account'
+const PAGE_PATH: Record<Page, string> = {
+  dashboard: '/', orders: '/orders', create: '/create', shipping: '/shipping',
+  invoices: '/invoices', returns: '/returns', images: '/images', customers: '/customers',
+  production: '/production', materials: '/materials', hr: '/hr', reports: '/reports',
+  admin: '/admin', account: '/account',
+}
 type NavItem = [Page, string, string, string]
 const navSections: Array<[string, NavItem[]]> = [
   ['Bán hàng', [['dashboard', 'bi-grid-1x2-fill', 'Tổng quan', 'sales.view'], ['create', 'bi-plus-circle-fill', 'Tạo đơn', 'sales.create'], ['orders', 'bi-card-checklist', 'Chi tiết đơn', 'sales.view'], ['shipping', 'bi-truck', 'Vận chuyển', 'sales.ship'], ['invoices', 'bi-receipt', 'Hóa đơn', 'sales.invoice'], ['returns', 'bi-arrow-return-left', 'Hàng trả', 'sales.returns'], ['images', 'bi-images', 'Kho ảnh', 'sales.view'], ['customers', 'bi-people-fill', 'Khách hàng / công nợ', 'sales.view']]],
@@ -31,18 +40,36 @@ function message(error: unknown) { return error instanceof ApiError ? error.mess
 
 export function App() {
   const { user, loading, logout } = useAuth()
-  const [page, setPage] = useState<Page>('dashboard')
+  const location = useLocation()
+  const navigate = useNavigate()
   if (loading) return <div className="splash">Đang khởi động AZALAS SPORT…</div>
   if (!user) return <Login />
+  let page: Page = 'dashboard'
+  if (location.pathname.startsWith('/orders/')) page = 'orders'
+  else if (location.pathname.startsWith('/invoices/')) page = 'invoices'
+  else page = Object.entries(PAGE_PATH).find(([, path]) => path === location.pathname)?.[0] as Page ?? 'dashboard'
+  const setPage = (next: Page) => navigate(PAGE_PATH[next])
   return <AppShell user={user} page={page} setPage={setPage} logout={logout}>
-      {page === 'dashboard' && <Dashboard go={setPage}/>} {page === 'orders' && <Orders/>}
-      {page === 'create' && <CreateOrder onCreated={() => setPage('orders')}/>} {page === 'shipping' && <ShippingPage/>}
-      {page === 'invoices' && <InvoicePage go={setPage}/>} {page === 'returns' && <ReturnsPage/>} {page === 'images' && <RecentImagesPage go={setPage}/>} {page === 'customers' && <Customers/>}
-      {page === 'production' && <ProductionPage/>}
-      {page === 'materials' && <MaterialsPage/>}
-      {page === 'hr' && <HrPage/>} {page === 'reports' && <ReportsPage onBack={() => setPage('dashboard')} onOpenOrders={() => setPage('orders')}/>}
-      {page === 'admin' && <AdminPage/>}
-      {page === 'account' && <AccountPage/>}
+    <Routes>
+      <Route path="/" element={<Dashboard go={setPage}/>}/>
+      <Route path="/orders" element={<Orders/>}/>
+      <Route path="/orders/:orderId/picking" element={<PickingPage/>}/>
+      <Route path="/create" element={<CreateOrder onCreated={() => setPage('orders')}/>}/>
+      <Route path="/shipping" element={<ShippingPage/>}/>
+      <Route path="/invoices" element={<InvoicePage go={setPage}/>}/>
+      <Route path="/invoices/group/:customerId" element={<InvoiceGroupPage/>}/>
+      <Route path="/invoices/draft/:draftId" element={<InvoiceDetailPage/>}/>
+      <Route path="/returns" element={<ReturnsPage/>}/>
+      <Route path="/images" element={<RecentImagesPage go={setPage}/>}/>
+      <Route path="/customers" element={<Customers/>}/>
+      <Route path="/production" element={<ProductionPage/>}/>
+      <Route path="/materials" element={<MaterialsPage/>}/>
+      <Route path="/hr" element={<HrPage/>}/>
+      <Route path="/reports" element={<ReportsPage onBack={() => setPage('dashboard')} onOpenOrders={() => setPage('orders')}/>}/>
+      <Route path="/admin" element={<AdminPage/>}/>
+      <Route path="/account" element={<AccountPage/>}/>
+      <Route path="*" element={<Dashboard go={setPage}/>}/>
+    </Routes>
   </AppShell>
 }
 
@@ -233,11 +260,22 @@ function MetricSkeleton() {
 
 type OrderView = QueueTab | 'STATS'
 
+type PickingRouteState = {
+  customerName: string
+  orders: Order[]
+  returnTo: string
+}
+
 function Orders() {
   const { user } = useAuth()
-  const [tab, setTab] = useState<OrderView>('NEW')
-  const [q, setQ] = useState('')
-  const [selected, setSelected] = useState<{ customerId: string; warehouseId: string } | null>(null)
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab = (searchParams.get('tab') as OrderView | null) ?? 'NEW'
+  const q = searchParams.get('q') ?? ''
+  const customerId = searchParams.get('customer_id')
+  const warehouseId = searchParams.get('warehouse_id')
+  const selected = customerId && warehouseId ? { customerId, warehouseId } : null
   const isStats = tab === 'STATS'
   const queue = useQuery({
     queryKey: ['queue', tab, q],
@@ -248,34 +286,72 @@ function Orders() {
     ['NEW', 'Đơn mới'], ['PICKING', 'Đang soạn'], ['DEBT', 'Nợ đơn'], ['CUSTOMER_ORDER', 'Khách đặt'],
     ...(user?.role === 'OWNER' ? [['STATS', 'Thống kê soạn'] as [OrderView, string]] : []),
   ]
-  useEffect(() => setSelected(null), [tab])
+  function updateListState(next: { tab?: OrderView; q?: string; customerId?: string | null; warehouseId?: string | null }) {
+    const params = new URLSearchParams(searchParams)
+    if (next.tab !== undefined) params.set('tab', next.tab)
+    if (next.q !== undefined) next.q ? params.set('q', next.q) : params.delete('q')
+    if (next.customerId !== undefined) next.customerId ? params.set('customer_id', next.customerId) : params.delete('customer_id')
+    if (next.warehouseId !== undefined) next.warehouseId ? params.set('warehouse_id', next.warehouseId) : params.delete('warehouse_id')
+    setSearchParams(params, { replace: true })
+  }
+  function beginPicking(order: Order, group: Order[], customerName: string) {
+    const path = `${location.pathname}${location.search}`
+    const orders = group.map(row => row.id === order.id && row.status === 'NEW' ? { ...row, status: 'PICKING' } : row)
+    const state: PickingRouteState = { customerName, orders, returnTo: path }
+    navigate(`/orders/${order.id}/picking`, { state })
+  }
   return <section className="page">
     <h1>Chi tiết đơn</h1>
-    <div className="tabs">{tabs.map(([id, label]) => <button className={tab === id ? 'active' : ''} onClick={() => setTab(id)} key={id}>{label}</button>)}</div>
+    <div className="tabs">{tabs.map(([id, label]) => <button className={tab === id ? 'active' : ''} onClick={() => updateListState({ tab: id, customerId: null, warehouseId: null })} key={id}>{label}</button>)}</div>
     {isStats ? <PickerStatistics/> : <>
-      <input className="form-control search" placeholder="Tìm mã đơn hoặc khách hàng…" value={q} onChange={e => setQ(e.target.value)}/>
-      {queue.isLoading ? <Loading/> : queue.error ? <Problem text={message(queue.error)}/> : <div className="queue-grid">{queue.data!.map(section => <div className="card warehouse" key={section.warehouse.id}><h2><span className={`type-badge ${section.warehouse.code === 'TAN_XUAN' ? 'badge-tan-xuan' : 'badge-ca-koi'}`}>{section.warehouse.name}</span><span className="count-pill">{section.order_count}</span></h2>{section.customers.map(c => <button className="customer-row" onClick={() => setSelected({ customerId: c.customer_id, warehouseId: section.warehouse.id })} key={c.customer_id}><i className="bi bi-person-circle"/><span><b>{c.customer_name}</b><small>{c.order_count} đơn</small></span>{c.has_urgent && <mark>GẤP</mark>}<i className="bi bi-chevron-right"/></button>)}</div>)}</div>}
-      {selected && <OrderDrawer {...selected} tab={tab as QueueTab} onClose={() => setSelected(null)}/>} 
+      <input className="form-control search" placeholder="Tìm mã đơn hoặc khách hàng…" value={q} onChange={e => updateListState({ q: e.target.value })}/>
+      {queue.isLoading ? <Loading/> : queue.error ? <Problem text={message(queue.error)}/> : <div className="queue-grid">{queue.data!.map(section => <div className="card warehouse" key={section.warehouse.id}><h2><span className={`type-badge ${section.warehouse.code === 'TAN_XUAN' ? 'badge-tan-xuan' : 'badge-ca-koi'}`}>{section.warehouse.name}</span><span className="count-pill">{section.order_count}</span></h2>{section.customers.map(c => <button className="customer-row" onClick={() => updateListState({ customerId: c.customer_id, warehouseId: section.warehouse.id })} key={c.customer_id}><i className="bi bi-person-circle"/><span><b>{c.customer_name}</b><small>{c.order_count} đơn</small></span>{c.has_urgent && <mark>GẤP</mark>}<i className="bi bi-chevron-right"/></button>)}</div>)}</div>}
+      {selected && <OrderDrawer {...selected} tab={tab as QueueTab} onClose={() => updateListState({ customerId: null, warehouseId: null })} onBeginPicking={beginPicking}/>}
     </>}
   </section>
 }
 
-function OrderDrawer({ customerId, warehouseId, tab, onClose }: { customerId: string; warehouseId: string; tab: QueueTab; onClose: () => void }) {
+function PickingPage() {
+  const { orderId = '' } = useParams()
+  const location = useLocation()
+  const navigate = useNavigate()
   const qc = useQueryClient()
-  const detail = useQuery({ queryKey: ['customer-orders', customerId, warehouseId, tab], queryFn: () => api<{customer: {name: string; phone: string | null}; warehouse: {name: string}; orders: Order[]}>(`/order-work-queue/customers/${customerId}`, { query: { warehouse_id: warehouseId, tab } }).then(r => r.data) })
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState<string | null>(null)
-  const [workspaceOrderId, setWorkspaceOrderId] = useState<string | null>(null)
-  async function claim(order: Order) {
-    setBusy(order.id); setError('')
-    try {
-      const claimed = await api<Order>(`/orders/${order.id}/claim`, { method: 'POST' })
-      await qc.invalidateQueries({ queryKey: ['queue'] })
-      await qc.invalidateQueries({ queryKey: ['customer-orders'] })
-      setWorkspaceOrderId(claimed.data.id)
-    } catch (e) { setError(message(e)) } finally { setBusy(null) }
+  const { user } = useAuth()
+  const routeState = location.state as PickingRouteState | null
+  const activeOrder = useQuery({
+    queryKey: ['order-detail', orderId],
+    enabled: !!orderId && !routeState?.orders?.length,
+    queryFn: () => api<OrderDetail>(`/orders/${orderId}`).then(response => response.data),
+  })
+  const fallbackOrders = useQuery({
+    queryKey: ['picking-group', orderId],
+    enabled: !!activeOrder.data,
+    queryFn: async () => {
+      const { customer, warehouse } = activeOrder.data!
+      const [newOrders, pickingOrders] = await Promise.all((['NEW', 'PICKING'] as QueueTab[]).map(tab =>
+        api<{ orders: Order[] }>(`/order-work-queue/customers/${customer.id}`, {
+          query: { warehouse_id: warehouse.id, tab },
+        }).then(response => response.data.orders)))
+      const byId = new Map([...newOrders, ...pickingOrders].map(order => [order.id, order]))
+      byId.set(activeOrder.data!.order.id, activeOrder.data!.order)
+      return [...byId.values()]
+    },
+  })
+
+  const orders = routeState?.orders ?? fallbackOrders.data
+  const customerName = routeState?.customerName ?? activeOrder.data?.customer.name ?? ''
+  const returnTo = routeState?.returnTo ?? '/orders'
+  if (!orders) return activeOrder.error || fallbackOrders.error
+    ? <div className="page"><Problem text={message(activeOrder.error ?? fallbackOrders.error)}/><button className="btn-outline" onClick={() => navigate(returnTo)}>← Quay lại Chi tiết đơn</button></div>
+    : <Loading/>
+
+  async function claimOrder(id: string) {
+    const response = await api<Order>(`/orders/${id}/claim`, { method: 'POST' })
+    await qc.invalidateQueries({ queryKey: ['queue'] })
+    return response.data
   }
-  if (workspaceOrderId) return <PickWorkspace orderId={workspaceOrderId} onClose={() => setWorkspaceOrderId(null)} onSaved={async () => {
+
+  async function savedOrder() {
     await Promise.all([
       qc.invalidateQueries({ queryKey: ['queue'] }),
       qc.invalidateQueries({ queryKey: ['customer-orders'] }),
@@ -283,8 +359,59 @@ function OrderDrawer({ customerId, warehouseId, tab, onClose }: { customerId: st
       qc.invalidateQueries({ queryKey: ['overview'] }),
       qc.invalidateQueries({ queryKey: ['customer-order-gallery'] }),
     ])
-  }}/>
-  return <div className="drawer-layer"><section className="drawer"><header className="blue-header"><button className="btn-back" onClick={onClose}>← Quay lại</button><span className="title">Đơn của khách</span></header>{detail.isLoading ? <Loading/> : detail.error ? <Problem text={message(detail.error)}/> : <><div className="drawer-intro"><b>{detail.data!.customer.name}</b><span>{detail.data!.customer.phone || 'Chưa có SĐT'} · {detail.data!.warehouse.name}</span></div>{error && <div className="error-text">{error}</div>}{detail.data!.orders.map(o => <article className="order-card" key={o.id}><div><b>{o.order_no}</b>{o.is_urgent && <mark>GẤP</mark>}<span className="type-badge">{STATUS_LABEL[o.status] ?? o.status}</span></div><p>Ngày tạo: {formatDateShort(o.created_date)} {o.delivery_date && <>· Giao: {formatDate(o.delivery_date)}</>}</p>{o.customer_note && <p className="muted">{o.customer_note}</p>}{o.claimed_by_name && <p className="muted">Người soạn: {o.claimed_by_name}</p>}<OrderImages images={o.images}/>{o.status === 'NEW' && <button className="btn-main" disabled={busy === o.id} onClick={() => claim(o)}>{busy === o.id ? 'ĐANG NHẬN…' : 'NHẬN ĐƠN & SOẠN'}</button>}{o.status === 'PICKING' && <button className="btn-main" onClick={() => setWorkspaceOrderId(o.id)}>MỞ SOẠN HÀNG</button>}</article>)}</>}</section></div>
+  }
+
+  async function releaseClaim(id: string, reason: string) {
+    await api<Order>(`/orders/${id}/release-claim`, { method: 'POST', body: { reason } })
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['queue'] }),
+      qc.invalidateQueries({ queryKey: ['customer-orders'] }),
+      qc.invalidateQueries({ queryKey: ['order-detail', id] }),
+    ])
+  }
+
+  async function deleteOrder(id: string) {
+    await api<{ ok: boolean }>(`/orders/${id}`, { method: 'DELETE' })
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['queue'] }),
+      qc.invalidateQueries({ queryKey: ['customer-orders'] }),
+      qc.invalidateQueries({ queryKey: ['order-detail', id] }),
+      qc.invalidateQueries({ queryKey: ['invoice-work-queue'] }),
+      qc.invalidateQueries({ queryKey: ['overview'] }),
+      qc.invalidateQueries({ queryKey: ['customer-order-gallery'] }),
+    ])
+  }
+
+  return <PickWorkspace orderId={orderId} customerName={customerName} orders={orders}
+    returnTo={returnTo} onClaim={claimOrder} onClose={() => navigate(returnTo)} onSaved={savedOrder}
+    onRelease={releaseClaim} onDelete={deleteOrder} currentUser={user}/>
+}
+
+function OrderDrawer({ customerId, warehouseId, tab, onClose, onBeginPicking }: { customerId: string; warehouseId: string; tab: QueueTab; onClose: () => void; onBeginPicking: (order: Order, group: Order[], customerName: string) => void }) {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const detail = useQuery({ queryKey: ['customer-orders', customerId, warehouseId, tab], queryFn: () => api<{customer: {name: string; phone: string | null}; warehouse: {name: string}; orders: Order[]}>(`/order-work-queue/customers/${customerId}`, { query: { warehouse_id: warehouseId, tab } }).then(r => r.data) })
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  async function claim(order: Order) {
+    setBusy(order.id); setError('')
+    try {
+      const claimed = await api<Order>(`/orders/${order.id}/claim`, { method: 'POST' })
+      await qc.invalidateQueries({ queryKey: ['queue'] })
+      onBeginPicking(claimed.data, detail.data?.orders ?? [claimed.data], detail.data?.customer.name ?? '')
+    }
+    catch (e) { setError(message(e)) } finally { setBusy(null) }
+  }
+  function openExisting(order: Order) {
+    const state: PickingRouteState = {
+      customerName: detail.data?.customer.name ?? '',
+      orders: detail.data?.orders ?? [order],
+      returnTo: `${location.pathname}${location.search}`,
+    }
+    navigate(`/orders/${order.id}/picking`, { state })
+  }
+  return <div className="drawer-layer order-drawer-layer"><section className="drawer"><header className="blue-header"><button className="btn-back" onClick={onClose}>← Quay lại Chi tiết đơn</button><span className="title">Đơn của khách</span></header>{detail.isLoading ? <Loading/> : detail.error ? <Problem text={message(detail.error)}/> : <><div className="drawer-intro"><b>{detail.data!.customer.name}</b><span>{detail.data!.customer.phone || 'Chưa có SĐT'} · {detail.data!.warehouse.name}</span></div>{error && <div className="error-text">{error}</div>}{detail.data!.orders.map(o => <article className="order-card" key={o.id}><div><b>{o.order_no}</b>{o.is_urgent && <mark>GẤP</mark>}<span className="type-badge">{o.status === 'PICKING' && o.claimed_by_name ? `Đang soạn - ${o.claimed_by_name}` : o.status === 'NEW' ? 'Chờ soạn' : STATUS_LABEL[o.status] ?? o.status}</span></div><p>Ngày tạo: {formatDateShort(o.created_date)} {o.delivery_date && <>· Giao: {formatDate(o.delivery_date)}</>}</p>{o.customer_note && <p className="muted">{o.customer_note}</p>}{o.claimed_by_name && <p className="muted">Người soạn: {o.claimed_by_name}</p>}<OrderImages images={o.images}/>{o.status === 'NEW' && <button className="btn-main" disabled={busy === o.id} onClick={() => claim(o)}>{busy === o.id ? 'ĐANG NHẬN…' : 'BẮT ĐẦU SOẠN ĐƠN NÀY'}</button>}{o.status === 'PICKING' && <button className="btn-main" onClick={() => openExisting(o)}>MỞ SOẠN HÀNG</button>}</article>)}</>}</section></div>
 }
 
 function CreateOrder({ onCreated }: { onCreated: () => void }) {
@@ -300,37 +427,50 @@ function CreateOrder({ onCreated }: { onCreated: () => void }) {
   const [createdOrders, setCreatedOrders] = useState<Array<{ customer_id: string; customer_name: string; order_id: string; order_no: string; warehouse: string }>>([])
   const bulkIdempotencyKey = useRef(crypto.randomUUID())
 
-  function addUploads(files: File[], source: PendingOrderImage['source']) {
-    setUploads(current => [...current, ...files.map(file => ({
-      key: crypto.randomUUID(),
-      file,
-      preview: URL.createObjectURL(file),
-      source,
-    }))])
+  function addUploads(files: File[], source: PendingOrderImage['source'], fingerprints: string[]) {
+    const known = new Set(uploads.map(image => image.fingerprint ?? `file:${image.file.name}|${image.file.size}|${image.file.type}|${image.file.lastModified}`))
+    const additions: PendingOrderImage[] = []
+    files.forEach((file, index) => {
+      const fingerprint = fingerprints[index]
+      if (known.has(fingerprint) || uploads.length + additions.length >= 20) return
+      known.add(fingerprint)
+      additions.push({ key: crypto.randomUUID(), file, preview: URL.createObjectURL(file), source, fingerprint })
+    })
+    if (additions.length) setUploads(current => [...current, ...additions])
     setError('')
   }
   function removeUpload(key: string) {
-    setUploads(current => {
-      const target = current.find(item => item.key === key); if (target) URL.revokeObjectURL(target.preview)
-      return current.filter(item => item.key !== key)
-    })
+    const target = uploads.find(item => item.key === key)
+    if (target) URL.revokeObjectURL(target.preview)
+    setUploads(current => current.filter(item => item.key !== key))
   }
   function updateMultiRow(key: string, update: (row: typeof multiRows[number]) => typeof multiRows[number]) {
     bulkIdempotencyKey.current = crypto.randomUUID()
     setCreatedOrders([])
     setMultiRows(current => current.map(row => row.key === key ? update(row) : row))
   }
-  function addRowUploads(key: string, files: File[], source: PendingOrderImage['source']) {
+  function addRowUploads(key: string, files: File[], source: PendingOrderImage['source'], fingerprints: string[]) {
+    const currentRow = multiRows.find(row => row.key === key)
+    if (!currentRow) return
+    const known = new Set(currentRow.uploads.map(image => image.fingerprint ?? `file:${image.file.name}|${image.file.size}|${image.file.type}|${image.file.lastModified}`))
+    const additions: PendingOrderImage[] = []
+    files.forEach((file, index) => {
+      const fingerprint = fingerprints[index]
+      if (known.has(fingerprint) || currentRow.uploads.length + additions.length >= 20) return
+      known.add(fingerprint)
+      additions.push({ key: crypto.randomUUID(), file, preview: URL.createObjectURL(file), source, fingerprint })
+    })
+    if (!additions.length) return
     updateMultiRow(key, row => ({
       ...row,
-      uploads: [...row.uploads, ...files.map(file => ({ key: crypto.randomUUID(), file, preview: URL.createObjectURL(file), source }))].slice(0, 20),
+      uploads: [...row.uploads, ...additions],
     }))
     setError('')
   }
   function removeRowUpload(rowKey: string, imageKey: string) {
+    const target = multiRows.find(row => row.key === rowKey)?.uploads.find(item => item.key === imageKey)
+    if (target) URL.revokeObjectURL(target.preview)
     updateMultiRow(rowKey, row => {
-      const target = row.uploads.find(item => item.key === imageKey)
-      if (target) URL.revokeObjectURL(target.preview)
       return { ...row, uploads: row.uploads.filter(item => item.key !== imageKey) }
     })
   }
@@ -342,11 +482,8 @@ function CreateOrder({ onCreated }: { onCreated: () => void }) {
   function removeCustomerRow(key: string) {
     bulkIdempotencyKey.current = crypto.randomUUID()
     setCreatedOrders([])
-    setMultiRows(current => {
-      const row = current.find(item => item.key === key)
-      row?.uploads.forEach(item => URL.revokeObjectURL(item.preview))
-      return current.filter(item => item.key !== key)
-    })
+    multiRows.find(row => row.key === key)?.uploads.forEach(item => URL.revokeObjectURL(item.preview))
+    setMultiRows(current => current.filter(item => item.key !== key))
   }
   async function invalidateOrderSurfaces() {
     await Promise.all([
@@ -438,7 +575,7 @@ function CreateOrder({ onCreated }: { onCreated: () => void }) {
   }
   return <section className="page narrow"><h1>Tạo đơn mới</h1><form className="card" onSubmit={submit}>
     <div className="tabs"><button type="button" disabled={busy} className={!multiMode ? 'active' : ''} onClick={() => { setMultiMode(false); setError('') }}>Một khách</button><button type="button" disabled={busy} className={multiMode ? 'active' : ''} onClick={() => { setMultiMode(true); setError('') }}>Nhiều khách</button></div>
-    {!multiMode && <div className="field"><label>Khách hàng *</label><select className="form-control" disabled={busy} value={customerId} onChange={e => setCustomerId(e.target.value)}><option value="">-- Chọn khách hàng --</option>{customers.data?.map(c => <option value={c.id} key={c.id}>{c.name}{c.phone ? ` · ${c.phone}` : ''}</option>)}</select></div>}
+    {!multiMode && <div className="field"><label>Khách hàng *</label><CustomerCombobox customers={customers.data ?? []} disabled={busy} value={customerId} onChange={setCustomerId}/></div>}
     <div className="field"><label>Kho / loại đơn *</label><select className="form-control" disabled={busy} value={mode} onChange={e => { bulkIdempotencyKey.current = crypto.randomUUID(); setCreatedOrders([]); setMode(e.target.value) }}><option value="TAN_XUAN">Tân Xuân</option><option value="CA_KOI">Cá Koi</option><option value="BOTH">Tân Xuân và Cá Koi</option><option value="CUSTOMER_ORDER">Khách đặt</option></select></div>
     <div className="field"><label>Ngày giao</label><input className="form-control" type="date" disabled={busy} value={delivery} onChange={e => { bulkIdempotencyKey.current = crypto.randomUUID(); setCreatedOrders([]); setDelivery(e.target.value) }}/></div>
     <div className="field check"><input id="urgent" type="checkbox" disabled={busy} checked={urgent} onChange={e => { bulkIdempotencyKey.current = crypto.randomUUID(); setCreatedOrders([]); setUrgent(e.target.checked) }}/><label htmlFor="urgent">Đơn gấp</label></div>
@@ -448,8 +585,8 @@ function CreateOrder({ onCreated }: { onCreated: () => void }) {
         const usedCustomerIds = multiRows.filter(other => other.key !== row.key).map(other => other.customerId)
         return <article className="card" key={row.key}>
           <h3>Khách hàng {index + 1}</h3>
-          <div className="field"><label>Khách hàng *</label><select className="form-control" disabled={busy} value={row.customerId} onChange={e => updateMultiRow(row.key, current => ({ ...current, customerId: e.target.value }))}><option value="">-- Chọn khách hàng --</option>{customers.data?.map(c => <option value={c.id} key={c.id} disabled={usedCustomerIds.includes(c.id)}>{c.name}{c.phone ? ` · ${c.phone}` : ''}</option>)}</select></div>
-          <div className="field"><label>Ảnh đơn hàng ({row.uploads.length}/20)</label><OrderImagePasteArea images={row.uploads} disabled={busy} onAdd={(files, source) => addRowUploads(row.key, files, source)} onRemove={imageKey => removeRowUpload(row.key, imageKey)}/></div>
+          <div className="field"><label>Khách hàng *</label><CustomerCombobox customers={customers.data ?? []} disabled={busy} value={row.customerId} excludeIds={usedCustomerIds} onChange={customerId => updateMultiRow(row.key, current => ({ ...current, customerId }))}/></div>
+          <div className="field"><label>Ảnh đơn hàng ({row.uploads.length}/20)</label><OrderImagePasteArea images={row.uploads} disabled={busy} onAdd={(files, source, fingerprints) => addRowUploads(row.key, files, source, fingerprints)} onRemove={imageKey => removeRowUpload(row.key, imageKey)}/></div>
           <div className="field"><label>Ghi chú riêng của khách</label><textarea className="form-control" disabled={busy} value={row.note} onChange={e => updateMultiRow(row.key, current => ({ ...current, note: e.target.value }))}/></div>
           {multiRows.length > 1 && <button type="button" className="btn-outline" disabled={busy} onClick={() => removeCustomerRow(row.key)}>Xóa khách này</button>}
         </article>

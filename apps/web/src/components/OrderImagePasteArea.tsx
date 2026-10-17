@@ -1,10 +1,11 @@
-import { useState, type ClipboardEvent, type DragEvent } from 'react'
+import { useRef, useState, type ClipboardEvent, type DragEvent } from 'react'
 
 export type PendingOrderImage = {
   key: string
   file: File
   preview: string
   source: 'file' | 'clipboard'
+  fingerprint?: string
   mediaId?: string
   error?: string
   uploading?: boolean
@@ -31,15 +32,22 @@ export function collectClipboardImageFiles(data: ClipboardData | null, timestamp
   candidates.push(...Array.from(data.files))
 
   const seen = new Set<string>()
+  const seenUnnamed = new WeakSet<File>()
   const files: File[] = []
   for (const candidate of candidates) {
     if (!ACCEPTED_IMAGE_TYPES.has(candidate.type)) {
       if (candidate.type.startsWith('image/')) unsupported = true
       continue
     }
-    const identity = `${candidate.name}|${candidate.size}|${candidate.lastModified}`
-    if (seen.has(identity)) continue
-    seen.add(identity)
+    const generatedClipboardName = /^clipboard-\d{8}-\d{6}-\d+\./.test(candidate.name)
+    if (candidate.name && !generatedClipboardName) {
+      const identity = `${candidate.name}|${candidate.size}|${candidate.type}|${candidate.lastModified}`
+      if (seen.has(identity)) continue
+      seen.add(identity)
+    } else {
+      if (seenUnnamed.has(candidate)) continue
+      seenUnnamed.add(candidate)
+    }
     if (!candidate.name) {
       const extension = candidate.type === 'image/jpeg' ? 'jpg' : candidate.type.slice('image/'.length)
       const stamp = [
@@ -60,6 +68,17 @@ export function collectClipboardImageFiles(data: ClipboardData | null, timestamp
     }
   }
   return { files, unsupported }
+}
+
+export async function fingerprintOrderImage(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  let first = 0x811c9dc5
+  let second = 0x9e3779b9
+  for (const byte of bytes) {
+    first = Math.imul(first ^ byte, 0x01000193)
+    second = Math.imul(second ^ byte, 0x85ebca6b)
+  }
+  return `blob:${file.size}|${file.type}|${(first >>> 0).toString(16)}${(second >>> 0).toString(16)}`
 }
 
 export function validOrderImage(file: File): boolean {
@@ -83,47 +102,75 @@ export function OrderImagePasteArea({
   disabled = false,
 }: {
   images: PendingOrderImage[]
-  onAdd: (files: File[], source: PendingOrderImage['source']) => void
+  onAdd: (files: File[], source: PendingOrderImage['source'], fingerprints: string[]) => void
   onRemove: (key: string) => void
   disabled?: boolean
 }) {
   const [notice, setNotice] = useState('')
   const [active, setActive] = useState(false)
+  const pendingFingerprints = useRef(new Set<string>())
 
-  function addFiles(files: File[], source: PendingOrderImage['source'], unsupported = false) {
+  async function addFiles(files: File[], source: PendingOrderImage['source'], unsupported = false) {
     if (disabled) return
-    const result = limitOrderImageBatch(files, images.length)
-    const added = result.accepted
-    const invalid = unsupported || result.invalid
-    if (added.length) onAdd(added, source)
-    if (!added.length) {
-      if (result.overLimit) setNotice('Tối đa 20 ảnh.')
+    const valid = files.filter(validOrderImage)
+    const fingerprints = await Promise.all(valid.map(file => fingerprintOrderImage(file)))
+    const known = new Set(await Promise.all(images.map(image => image.fingerprint
+      ? Promise.resolve(image.fingerprint)
+      : fingerprintOrderImage(image.file))))
+    const uniqueFiles: File[] = []
+    const uniqueFingerprints: string[] = []
+    let duplicates = 0
+    fingerprints.forEach((fingerprint, index) => {
+      if (known.has(fingerprint) || pendingFingerprints.current.has(fingerprint)) {
+        duplicates += 1
+        return
+      }
+      pendingFingerprints.current.add(fingerprint)
+      uniqueFiles.push(valid[index])
+      uniqueFingerprints.push(fingerprint)
+    })
+    const result = limitOrderImageBatch(uniqueFiles, images.length)
+    const acceptedFingerprints = uniqueFingerprints.slice(0, result.accepted.length)
+    const acceptedSet = new Set(acceptedFingerprints)
+    uniqueFingerprints.forEach(fingerprint => {
+      if (!acceptedSet.has(fingerprint)) pendingFingerprints.current.delete(fingerprint)
+    })
+    const invalid = unsupported || result.invalid || valid.length !== files.length
+    if (result.accepted.length) {
+      onAdd(result.accepted, source, acceptedFingerprints)
+      window.setTimeout(() => acceptedFingerprints.forEach(fingerprint => pendingFingerprints.current.delete(fingerprint)), 0)
+    }
+    if (!result.accepted.length) {
+      if (duplicates) setNotice('Ảnh đã có trong đơn nên được bỏ qua.')
+      else if (result.overLimit) setNotice('Tối đa 20 ảnh.')
       else if (invalid) setNotice('Ảnh không hợp lệ. Chỉ hỗ trợ JPEG, PNG, WEBP, tối đa 10 MB mỗi ảnh.')
       else setNotice(source === 'clipboard' ? 'Clipboard không có ảnh để dán.' : 'Không có tệp ảnh để thêm.')
       return
     }
-    if (result.overLimit) setNotice(`Đã thêm ${added.length} ảnh${source === 'clipboard' ? ' từ clipboard' : ''}. Tối đa 20 ảnh.`)
-    else if (invalid) setNotice(`Đã thêm ${added.length} ảnh${source === 'clipboard' ? ' từ clipboard' : ''}. Ảnh không hợp lệ đã bị bỏ qua.`)
-    else if (source === 'clipboard') setNotice(`Đã thêm ${added.length} ảnh từ clipboard.`)
-    else setNotice(`Đã thêm ${added.length} ảnh.`)
+    if (result.overLimit) setNotice(`Đã thêm ${result.accepted.length} ảnh${source === 'clipboard' ? ' từ clipboard' : ''}. Tối đa 20 ảnh.`)
+    else if (duplicates) setNotice(`Đã thêm ${result.accepted.length} ảnh; ảnh trùng đã được bỏ qua.`)
+    else if (invalid) setNotice(`Đã thêm ${result.accepted.length} ảnh${source === 'clipboard' ? ' từ clipboard' : ''}. Ảnh không hợp lệ đã bị bỏ qua.`)
+    else if (source === 'clipboard') setNotice(`Đã thêm ${result.accepted.length} ảnh từ clipboard.`)
+    else setNotice(`Đã thêm ${result.accepted.length} ảnh.`)
   }
 
   function onPaste(event: ClipboardEvent<HTMLDivElement>) {
     event.preventDefault()
+    event.stopPropagation()
     const result = collectClipboardImageFiles(event.clipboardData, new Date())
-    addFiles(result.files, 'clipboard', result.unsupported)
+    void addFiles(result.files, 'clipboard', result.unsupported)
   }
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     setActive(false)
-    addFiles(Array.from(event.dataTransfer.files), 'file')
+    void addFiles(Array.from(event.dataTransfer.files), 'file')
   }
 
   return <div className="order-image-paste">
     <label className="upload-picker"><i className="bi bi-images"/> Chọn ảnh JPEG/PNG/WEBP
       <input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={event => {
-        addFiles(Array.from(event.target.files ?? []), 'file')
+        void addFiles(Array.from(event.target.files ?? []), 'file')
         event.target.value = ''
       }} disabled={disabled || images.length >= 20}/>
     </label>

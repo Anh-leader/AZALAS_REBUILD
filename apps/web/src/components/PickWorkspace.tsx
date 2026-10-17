@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, STATUS_LABEL, type OrderDetail, type PickItem, type ProductVariant } from '../api/client'
+import { useNavigate } from 'react-router-dom'
+import { api, ApiError, STATUS_LABEL, type Order, type OrderDetail, type PickItem, type ProductVariant, type User } from '../api/client'
 import { fold, formatDate, formatMoney } from '../lib/format'
 import { OrderImages } from './OrderImages'
 
@@ -12,8 +13,117 @@ const emptyItem = (warehouseId: string): PickItem => ({
   unit_price_amount: 0, sale_type: 'NhapTay', note: null,
 })
 
-export function PickWorkspace({ orderId, onClose, onSaved }: {
-  orderId: string; onClose: () => void; onSaved: () => void | Promise<void>
+export function PickWorkspace({ orderId, customerName, orders, returnTo, onClaim, onClose, onSaved, onRelease, onDelete, currentUser }: {
+  orderId: string
+  customerName: string
+  orders: Order[]
+  returnTo: string
+  onClaim: (orderId: string) => Promise<Order>
+  onClose: () => void
+  onSaved: () => void | Promise<void>
+  onRelease: (orderId: string, reason: string) => Promise<void>
+  onDelete: (orderId: string, reason?: string) => Promise<void>
+  currentUser: User | null
+}) {
+  const navigate = useNavigate()
+  const [groupOrders, setGroupOrders] = useState(orders)
+  const [activeOrderId, setActiveOrderId] = useState(orderId)
+  const [dirty, setDirty] = useState(false)
+  const [switchError, setSwitchError] = useState('')
+  const [complete, setComplete] = useState(false)
+  const completedCount = groupOrders.filter(order => ['PICKED', 'SHIPPING', 'COMPLETED'].includes(order.status)).length
+  useEffect(() => setActiveOrderId(orderId), [orderId])
+
+  function navigateToOrder(id: string, nextOrders: Order[]) {
+    navigate(`/orders/${id}/picking`, {
+      replace: true,
+      state: { customerName, orders: nextOrders, returnTo },
+    })
+  }
+
+  async function selectOrder(next: Order) {
+    if (next.id === activeOrderId) return
+    if (dirty && !window.confirm('Đơn hiện tại có thay đổi chưa lưu. Bạn có muốn chuyển đơn không?')) return
+    setSwitchError('')
+    try {
+      const ready = next.status === 'NEW' ? await onClaim(next.id) : next
+      const nextOrders = groupOrders.map(order => order.id === ready.id ? ready : order)
+      setGroupOrders(nextOrders)
+      setDirty(false)
+      setActiveOrderId(next.id)
+      navigateToOrder(next.id, nextOrders)
+    } catch (caught) {
+      setSwitchError(caught instanceof Error ? caught.message : 'Không thể mở đơn tiếp theo.')
+    }
+  }
+
+  async function handleSaved(savedOrder: Order) {
+    const updatedOrders = groupOrders.map(order => order.id === savedOrder.id
+      ? { ...order, status: savedOrder.status, billing_status: savedOrder.billing_status, version: savedOrder.version }
+      : order)
+    setGroupOrders(updatedOrders)
+    setDirty(false)
+    await onSaved()
+    navigateToOrder(savedOrder.id, updatedOrders)
+    const next = updatedOrders.find(order => order.id !== savedOrder.id && ['NEW', 'PICKING'].includes(order.status))
+    if (!next) {
+      setComplete(true)
+      return
+    }
+    try {
+      const ready = next.status === 'NEW' ? await onClaim(next.id) : next
+      const nextOrders = updatedOrders.map(order => order.id === ready.id ? ready : order)
+      setGroupOrders(nextOrders)
+      setActiveOrderId(next.id)
+      navigateToOrder(next.id, nextOrders)
+    } catch (caught) {
+      setSwitchError(caught instanceof Error ? caught.message : 'Không thể mở đơn tiếp theo.')
+    }
+  }
+
+  function leaveWorkspace() {
+    if (dirty && !window.confirm('Đơn hiện tại có thay đổi chưa lưu. Bạn có muốn rời màn soạn không?')) return
+    onClose()
+  }
+
+  return <section className="pick-workspace">
+    <header className="pick-group-header">
+      <button className="btn-outline" onClick={leaveWorkspace}>← Quay lại Chi tiết đơn</button>
+      <div><h1>SOẠN CHI TIẾT ĐƠN</h1><b>{customerName}</b><span>Đã soạn {completedCount}/{groupOrders.length}</span></div>
+    </header>
+    <nav className="pick-order-tabs" aria-label="Các đơn của khách">
+      {groupOrders.map(order => {
+        const wasSent = ['SENT', 'PARTIALLY_PAID', 'PAID'].includes(order.billing_status)
+        const state = order.status === 'PICKING' ? 'Đang soạn'
+          : wasSent || ['SHIPPING', 'COMPLETED'].includes(order.status) ? 'Đã gửi đơn'
+            : order.status === 'PICKED' ? '✓ Đã soạn'
+              : order.status === 'NEW' ? 'Chưa soạn'
+                : STATUS_LABEL[order.status] ?? order.status
+        return <button key={order.id} className={`pick-order-tab${activeOrderId === order.id ? ' active' : ''}`}
+          aria-current={activeOrderId === order.id ? 'page' : undefined}
+          onClick={() => void selectOrder(order)}>
+          <b>{order.order_no}</b>
+          <span>Giao: {formatDate(order.delivery_date)}</span>
+          <small>{state}</small>
+        </button>
+      })}
+    </nav>
+    {switchError && <div className="pick-error" role="alert">{switchError}</div>}
+    {complete
+      ? <div className="pick-complete" role="status"><b>Đã soạn xong toàn bộ đơn của khách {customerName}.</b><button className="btn-main" onClick={onClose}>Quay lại Chi tiết đơn</button></div>
+      : <PickOrderEditor key={activeOrderId} orderId={activeOrderId} onDirtyChange={setDirty}
+          onClose={leaveWorkspace} onSaved={handleSaved} onRelease={onRelease} onDelete={onDelete} currentUser={currentUser}/>}
+  </section>
+}
+
+function PickOrderEditor({ orderId, onDirtyChange, onClose, onSaved, onRelease, onDelete, currentUser }: {
+  orderId: string
+  onDirtyChange: (dirty: boolean) => void
+  onClose: () => void
+  onSaved: (order: Order) => void | Promise<void>
+  onRelease: (orderId: string, reason: string) => Promise<void>
+  onDelete: (orderId: string, reason?: string) => Promise<void>
+  currentUser: User | null
 }) {
   const qc = useQueryClient()
   const detail = useQuery({ queryKey: ['order-detail', orderId], queryFn: () => api<OrderDetail>(`/orders/${orderId}`).then(r => r.data) })
@@ -29,16 +139,27 @@ export function PickWorkspace({ orderId, onClose, onSaved }: {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [stockErrors, setStockErrors] = useState<Record<string, string>>({})
+  const [releaseOpen, setReleaseOpen] = useState(false)
+  const [releaseReason, setReleaseReason] = useState('Kho/xưởng không có hàng')
+  const [releaseNote, setReleaseNote] = useState('')
+  const [releaseBusy, setReleaseBusy] = useState(false)
+  const [releaseError, setReleaseError] = useState('')
+  const [releaseToast, setReleaseToast] = useState('')
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteConfirmed, setDeleteConfirmed] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  const [deleteToast, setDeleteToast] = useState('')
 
   const storageKey = `azalas.pick-draft.${orderId}`
   useEffect(() => {
     if (!detail.data || draft) return
     const saved = sessionStorage.getItem(storageKey)
     if (saved) {
-      try { setDraft(JSON.parse(saved)); setDirty(true); return } catch { sessionStorage.removeItem(storageKey) }
+      try { setDraft(JSON.parse(saved)); setDirty(true); onDirtyChange(true); return } catch { sessionStorage.removeItem(storageKey) }
     }
     setDraft({ items: detail.data.items.length ? detail.data.items : [emptyItem(detail.data.warehouse.id)], staffNote: detail.data.order.staff_note ?? '', version: detail.data.order.version })
-  }, [detail.data, draft, storageKey])
+  }, [detail.data, draft, storageKey, onDirtyChange])
 
   useEffect(() => {
     if (dirty && draft) sessionStorage.setItem(storageKey, JSON.stringify(draft))
@@ -60,7 +181,7 @@ export function PickWorkspace({ orderId, onClose, onSaved }: {
 
   function change(index: number, patch: Partial<PickItem>) {
     setDraft(current => current ? { ...current, items: current.items.map((item, i) => i === index ? { ...item, ...patch } : item) } : current)
-    setDirty(true); setStockErrors({}); setSuccess('')
+    setDirty(true); onDirtyChange(true); setStockErrors({}); setSuccess('')
   }
   function addVariant(variant: ProductVariant) {
     if (!draft || !warehouseId) return
@@ -72,16 +193,47 @@ export function PickWorkspace({ orderId, onClose, onSaved }: {
       color: variant.color, size: variant.size, warehouse_id: warehouseId,
       quantity: 1, unit_price_amount: 0, sale_type: 'MaBanHang', note: null,
     }] })
-    setDirty(true); setSearch(''); setSuccess('')
+    setDirty(true); onDirtyChange(true); setSearch(''); setSuccess('')
   }
   function remove(index: number) {
     if (!draft || !warehouseId) return
     const next = draft.items.filter((_, i) => i !== index)
-    setDraft({ ...draft, items: next.length ? next : [emptyItem(warehouseId)] }); setDirty(true); setSuccess('')
+    setDraft({ ...draft, items: next.length ? next : [emptyItem(warehouseId)] }); setDirty(true); onDirtyChange(true); setSuccess('')
   }
   function close() {
-    if (!dirty || window.confirm('Đơn đang có thay đổi chưa lưu. Bạn vẫn muốn rời màn hình?')) onClose()
+    onClose()
   }
+  async function releaseOrder() {
+    if (!detail.data) return
+    setReleaseBusy(true); setReleaseError('')
+    const note = releaseNote.trim()
+    const reason = releaseReason === 'Khác' ? (note ? `Khác - ${note}` : 'Khác') : releaseReason
+    try {
+      await onRelease(orderId, reason)
+      sessionStorage.removeItem(storageKey); setDirty(false); onDirtyChange(false)
+      setReleaseBusy(false); setReleaseOpen(false)
+      setReleaseToast(`Đã nhả đơn ${order.order_no} thành công`)
+      window.setTimeout(() => onClose(), 1200)
+    } catch (caught) {
+      setReleaseError(caught instanceof Error ? caught.message : 'Không nhả được đơn.')
+      setReleaseBusy(false)
+    }
+  }
+  async function deleteOrder() {
+    if (!detail.data) return
+    setDeleteBusy(true); setDeleteError('')
+    try {
+      await onDelete(orderId)
+      sessionStorage.removeItem(storageKey); setDirty(false); onDirtyChange(false)
+      setDeleteBusy(false); setDeleteOpen(false)
+      setDeleteToast(`Đã xóa đơn ${order.order_no}`)
+      window.setTimeout(() => onClose(), 1200)
+    } catch (caught) {
+      setDeleteError(caught instanceof Error ? caught.message : 'Không xóa được đơn.')
+      setDeleteBusy(false)
+    }
+  }
+
   async function save() {
     if (!draft || !detail.data) return
     setBusy(true); setError(''); setStockErrors({})
@@ -90,12 +242,12 @@ export function PickWorkspace({ orderId, onClose, onSaved }: {
         method: 'PUT', body: { order_id: orderId, version: draft.version, staff_note: draft.staffNote, items: draft.items },
       })
       setDraft(current => current ? { ...current, version: saved.data.order.version } : current)
-      sessionStorage.removeItem(storageKey); setDirty(false)
+      sessionStorage.removeItem(storageKey); setDirty(false); onDirtyChange(false)
       await Promise.all([
         qc.invalidateQueries({ queryKey: ['queue'] }),
         qc.invalidateQueries({ queryKey: ['order-detail', orderId] }),
-        onSaved(),
       ])
+      await onSaved(saved.data.order)
       setSuccess('Đã lưu soạn và chuyển đơn sang Hóa đơn / Chưa gửi đơn.')
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === 'INSUFFICIENT_STOCK') {
@@ -106,14 +258,20 @@ export function PickWorkspace({ orderId, onClose, onSaved }: {
     } finally { setBusy(false) }
   }
 
-  if (detail.error) return <div className="pick-workspace"><header className="blue-header teal"><button className="btn-back" onClick={onClose}>← Quay lại</button><span className="title">SOẠN CHI TIẾT ĐƠN</span></header><div className="error-text">Không tải được đơn.</div></div>
-  if (detail.isLoading || !draft) return <div className="pick-workspace"><div className="loading">Đang mở workspace soạn hàng…</div></div>
+  if (detail.error) return <div className="pick-editor-error"><button className="btn-outline" onClick={onClose}>← Quay lại Chi tiết đơn</button><div className="error-text">Không tải được đơn.</div></div>
+  if (detail.isLoading || !draft) return <div className="loading">Đang mở workspace soạn hàng…</div>
   const order = detail.data!.order
   const totalQty = draft.items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)
   const totalAmount = draft.items.reduce((sum, item) => sum + Math.round((Number(item.quantity) || 0) * (Number(item.unit_price_amount) || 0)), 0)
 
-  return <div className="pick-workspace">
-    <header className="blue-header teal"><button className="btn-back" onClick={close}>← Quay lại</button><span className="title">SOẠN CHI TIẾT ĐƠN</span><span>{order.order_no}</span></header>
+  const canRelease = order.status === 'PICKING' && (!order.claimed_by || order.claimed_by === currentUser?.id || currentUser?.role === 'OWNER' || currentUser?.role === 'ADMIN')
+  const canDelete = currentUser?.role === 'OWNER' || currentUser?.role === 'ADMIN' || currentUser?.permissions?.includes('order.delete')
+
+  return <>
+    <header className="pick-active-order"><span>SOẠN CHI TIẾT ĐƠN</span><b>{order.order_no}</b>
+      {canRelease && <button className="btn-outline release-order" onClick={() => { setReleaseError(''); setReleaseOpen(true) }}>NHẢ ĐƠN</button>}
+      {canDelete && <button className="btn-outline btn-danger" onClick={() => { setDeleteError(''); setDeleteConfirmed(false); setDeleteOpen(true) }}>XÓA ĐƠN</button>}
+      <button className="btn-outline" onClick={close}>Đóng đơn hiện tại</button></header>
     <div className="pick-layout">
       <aside className="pick-summary card">
         <b>{detail.data!.customer.name}</b><span>{detail.data!.warehouse.name}</span>
@@ -143,9 +301,52 @@ export function PickWorkspace({ orderId, onClose, onSaved }: {
             <td><button className="line-remove" onClick={() => remove(index)}>×</button></td>
           </tr>
         })}</tbody></table></div>
-        <button className="btn-outline add-line" onClick={() => { setDraft({...draft, items: [...draft.items, emptyItem(detail.data!.warehouse.id)]}); setDirty(true); setSuccess('') }}>+ Thêm dòng</button>
-        <div className="card pick-footer"><textarea className="form-control" placeholder="Ghi chú nhân viên" value={draft.staffNote} onChange={e => { setDraft({...draft, staffNote: e.target.value}); setDirty(true); setSuccess('') }}/><div><span>Tổng số lượng <b>{totalQty}</b></span><span>Tổng tiền <b>{formatMoney(totalAmount)}</b></span></div><button className="btn-main" disabled={busy} onClick={save}>{busy ? 'ĐANG KIỂM TRA TỒN…' : 'LƯU SOẠN & GIỮ TỒN'}</button></div>
+        <button className="btn-outline add-line" onClick={() => { setDraft({...draft, items: [...draft.items, emptyItem(detail.data!.warehouse.id)]}); setDirty(true); onDirtyChange(true); setSuccess('') }}>+ Thêm dòng</button>
+        <div className="card pick-footer"><textarea className="form-control" placeholder="Ghi chú nhân viên" value={draft.staffNote} onChange={e => { setDraft({...draft, staffNote: e.target.value}); setDirty(true); onDirtyChange(true); setSuccess('') }}/><div><span>Tổng số lượng <b>{totalQty}</b></span><span>Tổng tiền <b>{formatMoney(totalAmount)}</b></span></div><button className="btn-main" disabled={busy} onClick={save}>{busy ? 'ĐANG KIỂM TRA TỒN…' : 'LƯU SOẠN & GIỮ TỒN'}</button></div>
       </main>
     </div>
-  </div>
+    {releaseOpen && <div className="modal-layer" role="presentation" onClick={() => { if (!releaseBusy) setReleaseOpen(false) }}>
+      <div className="modal-card release-modal" role="dialog" aria-modal="true" aria-label="Nhả đơn" onClick={e => e.stopPropagation()}>
+        <h2>Nhả đơn {order.order_no}</h2>
+        <p className="muted">Đơn sẽ quay lại danh sách chờ và nhân viên khác có thể nhận.</p>
+        {dirty && <p className="release-warn">Đơn đang có thay đổi chưa lưu. Nếu nhả đơn, các thay đổi chưa lưu sẽ bị mất.</p>}
+        <label>Lý do nhả đơn
+          <select className="form-control" value={releaseReason} onChange={e => setReleaseReason(e.target.value)}>
+            <option>Kho/xưởng không có hàng</option>
+            <option>Sai kho</option>
+            <option>Không đủ hàng</option>
+            <option>Chuyển nhân viên khác xử lý</option>
+            <option>Khác</option>
+          </select>
+        </label>
+        {releaseReason === 'Khác' && <label>Ghi chú lý do
+          <input className="form-control" value={releaseNote} onChange={e => setReleaseNote(e.target.value)} placeholder="Nhập lý do khác"/>
+        </label>}
+        {releaseError && <div className="error-text">{releaseError}</div>}
+        <div className="modal-actions">
+          <button className="btn-outline" disabled={releaseBusy} onClick={() => setReleaseOpen(false)}>Hủy</button>
+          <button className="btn-main release-confirm" disabled={releaseBusy} onClick={releaseOrder}>{releaseBusy ? 'ĐANG NHẢ ĐƠN…' : 'XÁC NHẬN NHẢ ĐƠN'}</button>
+        </div>
+      </div>
+    </div>}
+    {deleteOpen && <div className="modal-layer" role="presentation" onClick={() => { if (!deleteBusy) setDeleteOpen(false) }}>
+      <div className="modal-card delete-modal" role="dialog" aria-modal="true" aria-label="Xóa đơn" onClick={e => e.stopPropagation()}>
+        <h2>Xóa đơn {order.order_no}</h2>
+        <p className="muted">Bạn có chắc muốn xóa đơn {order.order_no}?</p>
+        <p className="release-warn">Thao tác này không thể hoàn tác.</p>
+        {dirty && <p className="release-warn">Đơn đang có thay đổi chưa lưu. Nếu xóa đơn, các thay đổi chưa lưu sẽ bị mất.</p>}
+        <label className="delete-confirm-label">
+          <input type="checkbox" checked={deleteConfirmed} disabled={deleteBusy} onChange={e => setDeleteConfirmed(e.target.checked)}/>
+          <span>Tôi xác nhận xóa đơn này</span>
+        </label>
+        {deleteError && <div className="error-text">{deleteError}</div>}
+        <div className="modal-actions">
+          <button className="btn-outline" disabled={deleteBusy} onClick={() => setDeleteOpen(false)}>Hủy</button>
+          <button className="btn-main delete-confirm" disabled={deleteBusy || !deleteConfirmed} onClick={deleteOrder}>{deleteBusy ? 'ĐANG XÓA ĐƠN…' : 'Xóa đơn'}</button>
+        </div>
+      </div>
+    </div>}
+    {releaseToast && <div className="toast" role="status">{releaseToast}</div>}
+    {deleteToast && <div className="toast" role="status">{deleteToast}</div>}
+  </>
 }

@@ -52,6 +52,30 @@ class VoidIn(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class DraftCreateIn(BaseModel):
+    customer_id: uuid.UUID
+    order_ids: list[uuid.UUID] = Field(min_length=1)
+
+
+class DraftItemIn(BaseModel):
+    order_id: uuid.UUID
+    item_id: uuid.UUID
+    quantity: float | None = None
+    unit_price_amount: int | None = None
+
+
+class DraftUpdateIn(BaseModel):
+    items: list[DraftItemIn] | None = None
+    old_debt_override: int | None = None
+    surcharge_amount: int | None = None
+    note: str | None = None
+    payments: list[PaymentLineIn] | None = None
+
+
+class DraftCaptureIn(BaseModel):
+    media_id: uuid.UUID
+
+
 @router.get("")
 def list_invoices(status: str | None = None, customer_id: uuid.UUID | None = None,
                   db: Session = Depends(get_db), _=Depends(current_user)):
@@ -115,6 +139,52 @@ def close(body: CloseIn, idempotency_key: str = Header(..., alias="Idempotency-K
     data = body.model_dump()
     data["payments"] = [row.model_dump() for row in body.payments]
     return {"data": svc.close_invoice(db, **data, idempotency_key=idempotency_key, user=user)}
+
+
+@router.get("/customers/{customer_id}/pending-orders")
+def customer_pending_orders(customer_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(current_user)):
+    return {"data": svc.customer_pending_orders(db, customer_id=customer_id)}
+
+
+@router.post("/drafts", status_code=201)
+def create_draft(body: DraftCreateIn, db: Session = Depends(get_db),
+                 user: User = Depends(require_permission("sales.invoice"))):
+    return {"data": svc.draft_invoice(db, customer_id=body.customer_id,
+                                      order_ids=body.order_ids, user=user)}
+
+
+@router.get("/drafts/{draft_id}")
+def get_draft(draft_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(current_user)):
+    return {"data": svc.get_invoice_draft(db, draft_id=draft_id)}
+
+
+@router.patch("/drafts/{draft_id}")
+def update_draft(draft_id: uuid.UUID, body: DraftUpdateIn, db: Session = Depends(get_db),
+                 user: User = Depends(require_permission("sales.invoice"))):
+    data = body.model_dump(exclude_unset=True)
+    items = [row.model_dump() for row in body.items] if body.items is not None else None
+    payments = [row.model_dump() for row in body.payments] if body.payments is not None else None
+    return {"data": svc.update_invoice_draft(
+        db, draft_id=draft_id, user=user, items=items,
+        old_debt_override=data.get("old_debt_override"),
+        old_debt_set="old_debt_override" in data,
+        surcharge_amount=data.get("surcharge_amount"),
+        note=data.get("note"),
+        payments=payments,
+    )}
+
+
+@router.post("/drafts/{draft_id}/capture", status_code=201)
+def capture_draft(draft_id: uuid.UUID, body: DraftCaptureIn, db: Session = Depends(get_db),
+                  user: User = Depends(require_permission("sales.invoice"))):
+    return {"data": svc.capture_invoice_draft(db, draft_id=draft_id, media_id=body.media_id, user=user)}
+
+
+@router.post("/drafts/{draft_id}/finalize", status_code=201)
+def finalize_draft(draft_id: uuid.UUID, idempotency_key: str = Header(..., alias="Idempotency-Key"),
+                   db: Session = Depends(get_db), user: User = Depends(require_permission("sales.invoice"))):
+    return {"data": svc.finalize_invoice_draft(db, draft_id=draft_id,
+                                               idempotency_key=idempotency_key, user=user)}
 
 
 @router.get("/{invoice_id}")

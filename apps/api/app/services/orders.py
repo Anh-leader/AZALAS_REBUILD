@@ -3,12 +3,31 @@ import uuid
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..core.errors import ApiError
 from ..core.text import fold
-from ..models import AuditLog, Customer, MediaObject, Order, OrderGroup, OrderMedia, OrderStatusEvent, User, Warehouse
+from ..models import (
+    AuditLog,
+    Customer,
+    InventoryBalance,
+    InventoryReservation,
+    InventoryReservationLine,
+    InvoiceCapture,
+    InvoiceDraft,
+    InvoiceOrder,
+    MediaObject,
+    Order,
+    OrderGroup,
+    OrderItem,
+    OrderItemRevision,
+    OrderMedia,
+    OrderStatusEvent,
+    ProductionBatch,
+    User,
+    Warehouse,
+)
 from .storage import media_view_url
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -354,6 +373,7 @@ def order_to_dict(o: Order) -> dict:
         "customer_note": o.customer_note,
         "staff_note": o.staff_note,
         "status": o.status,
+        "claimed_by": str(o.claimed_by) if o.claimed_by else None,
         "claimed_by_name": o.claimer.display_name if o.claimer else None,
         "picked_at": o.picked_at.isoformat() if o.picked_at else None,
         "total_amount": o.total_amount,
@@ -413,3 +433,157 @@ def claim_order(db: Session, *, order_id: uuid.UUID, user: User) -> Order:
     db.commit()
     db.refresh(order)
     return order
+
+
+def release_claim(db: Session, *, order_id: uuid.UUID, user: User, reason: str | None = None) -> Order:
+    """Nhả đơn: giải phóng quyền giữ đơn của nhân viên hiện tại.
+
+    Chỉ áp dụng cho đơn đang ở trạng thái PICKING (đã nhận nhưng chưa lưu
+    soạn & giữ tồn). Đơn đã lưu (PICKED) không nhả qua luồng này để tránh làm
+    lệch reservation tồn kho; khi đó cần luồng "mở lại / chuyển người xử lý".
+    """
+    order = db.scalar(select(Order).where(Order.id == order_id).with_for_update(of=Order))
+    if not order:
+        raise ApiError(404, "ORDER_NOT_FOUND", "Không tìm thấy đơn hàng.")
+    is_manager = user.role in ("OWNER", "ADMIN")
+    if not order.claimed_by:
+        raise ApiError(409, "ORDER_NOT_CLAIMED", "Đơn chưa được nhận.")
+    if order.claimed_by != user.id and not is_manager:
+        raise ApiError(403, "ORDER_NOT_ASSIGNEE", "Chỉ người đang giữ đơn hoặc quản lý mới được nhả đơn.")
+    if order.billing_status not in ("DRAFT", "READY"):
+        raise ApiError(409, "ORDER_BILLING_LOCKED", "Đơn đã gửi hóa đơn hoặc không còn ở trạng thái chờ hóa đơn.")
+    if order.status == "PICKED":
+        raise ApiError(409, "ORDER_SAVED", "Đơn đã lưu soạn & giữ tồn, không thể nhả. Hãy dùng luồng mở lại / chuyển người xử lý.")
+    if order.status != "PICKING":
+        raise ApiError(409, "ORDER_NOT_RELEASABLE", "Đơn không còn ở trạng thái có thể nhả.")
+
+    previous_claimed_by = order.claimed_by
+    previous_claimer = order.claimer.display_name if order.claimer else None
+    previous_status = order.status
+    release_reason = (reason or "").strip()
+    detail = f"Nhả đơn - lý do: {release_reason}" if release_reason else "Nhả đơn"
+    if is_manager and previous_claimed_by != user.id:
+        detail = f"Manager {user.display_name} nhả đơn {order.order_no} đang được giữ bởi {previous_claimer or 'nhân viên khác'}"
+        if release_reason:
+            detail += f" - lý do: {release_reason}"
+
+    order.claimed_by = None
+    order.claimed_at = None
+    order.status = "NEW"
+    order.version += 1
+    db.add(OrderStatusEvent(order_id=order.id, from_status=previous_status, to_status="NEW",
+                            actor_user_id=user.id, reason=detail))
+    db.add(AuditLog(entity_type="ORDER", entity_id=order.id, action="ORDER_RELEASED", actor_user_id=user.id,
+                    before_data={"status": previous_status, "claimed_by": str(previous_claimed_by),
+                                 "claimed_by_name": previous_claimer},
+                    after_data={"status": "NEW", "claimed_by": None, "reason": release_reason or None}))
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+DELETABLE_ORDER_STATUSES = {"NEW", "PICKING", "PICKED"}
+DELETABLE_BILLING_STATUSES = {"DRAFT", "READY"}
+
+
+def delete_order(db: Session, *, order_id: uuid.UUID, user: User, reason: str | None = None) -> dict:
+    """Xóa đơn một cách an toàn.
+
+    Chỉ cho phép xóa khi đơn chưa phát sinh hóa đơn, thanh toán/công nợ, hàng
+    trả hoặc sản xuất (những liên kết đó đều đi qua invoice_orders hoặc
+    production_batches). Trước khi xóa, mọi reservation tồn kho và dữ liệu soạn
+    phụ thuộc được giải phóng/loại bỏ trong cùng một transaction.
+    """
+    order = db.scalar(select(Order).where(Order.id == order_id).with_for_update(of=Order))
+    if not order:
+        raise ApiError(404, "ORDER_NOT_FOUND", "Không tìm thấy đơn hàng.")
+    order_code = order.order_no
+    customer_id = order.customer_id
+    group_id = order.order_group_id
+    previous_status = order.status
+
+    # Đơn đã lên hóa đơn (invoice_orders là liên kết duy nhất sang invoices).
+    if db.scalar(select(InvoiceOrder.id).where(InvoiceOrder.order_id == order.id).limit(1)):
+        raise ApiError(409, "ORDER_HAS_INVOICE", "Không thể xóa đơn vì đã phát sinh hóa đơn.")
+    if order.billing_status not in DELETABLE_BILLING_STATUSES:
+        raise ApiError(409, "ORDER_HAS_INVOICE", "Không thể xóa đơn vì đã phát sinh hóa đơn.")
+
+    # Đơn đã phát sinh mâm sản xuất liên kết.
+    if db.scalar(select(ProductionBatch.id).where(ProductionBatch.synced_order_id == order.id).limit(1)):
+        raise ApiError(409, "ORDER_HAS_PRODUCTION", "Không thể xóa đơn vì đã phát sinh sản xuất.")
+
+    if order.status not in DELETABLE_ORDER_STATUSES:
+        raise ApiError(409, "ORDER_NOT_DELETABLE", f"Không thể xóa đơn vì đơn đang ở trạng thái {order.status}.")
+
+    # Hóa đơn nháp / bản chụp hóa đơn tạm còn tham chiếu tới đơn.
+    order_id_text = str(order.id)
+    drafts = list(db.scalars(select(InvoiceDraft).where(InvoiceDraft.customer_id == customer_id)))
+    if any(order_id_text in (draft.order_ids or []) for draft in drafts):
+        raise ApiError(409, "ORDER_HAS_INVOICE_DRAFT", "Không thể xóa đơn vì đang có hóa đơn nháp.")
+    captures = list(db.scalars(select(InvoiceCapture).where(InvoiceCapture.customer_id == customer_id)))
+    if any(order_id_text in (capture.order_ids or []) for capture in captures):
+        raise ApiError(409, "ORDER_HAS_INVOICE_CAPTURE", "Không thể xóa đơn vì đang có bản chụp hóa đơn.")
+
+    # Giải phóng reservation tồn kho nếu có (trả reserved về on_hand).
+    reservation = db.scalar(select(InventoryReservation).where(InventoryReservation.order_id == order.id))
+    active_lines: list[InventoryReservationLine] = []
+    if reservation:
+        active_lines = list(db.scalars(select(InventoryReservationLine).where(
+            InventoryReservationLine.reservation_id == reservation.id,
+            InventoryReservationLine.status == "ACTIVE",
+        )))
+    released_reservations = len(active_lines)
+    if active_lines:
+        variant_ids = {line.variant_id for line in active_lines}
+        balances = list(db.scalars(select(InventoryBalance).where(
+            InventoryBalance.variant_id.in_(variant_ids),
+            InventoryBalance.warehouse_id == order.warehouse_id,
+        ).with_for_update(of=InventoryBalance)))
+        balance_by_scope = {(b.variant_id, b.warehouse_id, b.location_id): b for b in balances}
+        for line in active_lines:
+            balance = balance_by_scope.get((line.variant_id, line.warehouse_id, line.location_id))
+            if balance is None:
+                balance = balance_by_scope.get((line.variant_id, line.warehouse_id, None))
+            if balance is None:
+                raise ApiError(409, "RESERVATION_BALANCE_MISSING", "Không thể xóa đơn vì không tìm thấy tồn kho tương ứng.")
+            balance.reserved -= line.quantity
+            balance.available = balance.on_hand - balance.reserved
+            balance.version += 1
+            line.status = "RELEASED"
+
+    # Xóa các dòng phụ thuộc theo đúng thứ tự FK (reservation lines -> items -> revisions -> events).
+    # order_media được SQLAlchemy tự xóa khi `db.delete(order)` (many-to-many secondary).
+    if reservation:
+        db.execute(delete(InventoryReservationLine).where(InventoryReservationLine.reservation_id == reservation.id))
+        db.execute(delete(InventoryReservation).where(InventoryReservation.id == reservation.id))
+    db.execute(delete(OrderItem).where(OrderItem.order_id == order.id))
+    db.execute(delete(OrderItemRevision).where(OrderItemRevision.order_id == order.id))
+    db.execute(delete(OrderStatusEvent).where(OrderStatusEvent.order_id == order.id))
+    deleted_media_links = db.scalar(select(func.count()).select_from(OrderMedia).where(OrderMedia.order_id == order.id)) or 0
+
+    db.delete(order)
+    db.flush()
+
+    # Dọn order_group nếu đây là đơn cuối cùng của nhóm.
+    if group_id:
+        remaining = db.scalar(select(func.count(Order.id)).where(Order.order_group_id == group_id)) or 0
+        if remaining == 0:
+            db.execute(delete(OrderGroup).where(OrderGroup.id == group_id))
+
+    db.add(AuditLog(
+        entity_type="ORDER",
+        entity_id=order.id,
+        action="DELETE_ORDER",
+        module="SALES",
+        actor_user_id=user.id,
+        before_data={"order_no": order_code, "customer_id": str(customer_id), "status": previous_status},
+        after_data={"deleted": True, "reason": (reason or "").strip() or None},
+    ))
+    db.commit()
+    return {
+        "ok": True,
+        "order_id": str(order.id),
+        "order_code": order_code,
+        "released_reservations": released_reservations,
+        "deleted_media_links": deleted_media_links,
+    }

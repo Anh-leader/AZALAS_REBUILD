@@ -13,6 +13,7 @@ export default defineConfig({
       '/uploads': API,
     },
     allowedHosts: [
+      'nnanh.com.vn',
       'stays-leave-passage-jersey.trycloudflare.com'
     ]
   },
