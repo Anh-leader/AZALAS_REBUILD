@@ -13,6 +13,34 @@ from sqlalchemy.engine import Engine
 from .config import Config
 from .transfer import LegacyDownloader, R2Uploader, sha256_hex
 
+THUMB_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+def _resize_to_webp(data: bytes, *, max_width: int = 400) -> tuple[bytes, str] | None:
+    """Resize raw image bytes to a WebP thumbnail (mirror of app.services.media)."""
+    import io
+
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - dependency declared
+        return None
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception:  # noqa: BLE001 - corrupt/unreadable/non-image bytes
+        return None
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+    image.thumbnail((max_width, max_width))
+    buffer = io.BytesIO()
+    image.save(buffer, format="WEBP", quality=80, method=4)
+    return buffer.getvalue(), "image/webp"
+
+
+def _thumbnail_key(object_key: str) -> str:
+    """Derive the immutable thumbnail object key (``<original>.thumb.webp``)."""
+    return f"{object_key}.thumb.webp"
+
 def _chunks(items: list[str], size: int):
     for i in range(0, len(items), size):
         yield items[i:i + size]
@@ -456,6 +484,23 @@ class MediaMigrator:
             self._mark_failed(res)
             self._fail(res, stats)
             return
+
+        # Best-effort thumbnail: gallery grids use <original>.thumb.webp directly,
+        # so generate + persist it at upload time. A thumbnail failure must not
+        # fail the (already successful) original upload.
+        if (res.content_type or "").startswith("image/"):
+            try:
+                thumb = _resize_to_webp(res.data, max_width=400)
+                if thumb is not None:
+                    thumb_data, thumb_mime = thumb
+                    self.uploader.upload(
+                        object_key=_thumbnail_key(res.r2_object_key),
+                        data=thumb_data,
+                        content_type=thumb_mime,
+                        sha256=sha256_hex(thumb_data),
+                    )
+            except Exception:  # noqa: BLE001 - thumbnail is non-critical
+                pass
 
         self._update_ready(
             res,

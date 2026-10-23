@@ -36,6 +36,9 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'reports.picker': 'Xem hiệu suất soạn hàng',
   'reports.view': 'Xem báo cáo',
 
+  'customer_debt.view': 'Xem khách hàng / công nợ',
+  'order_detail.view': 'Xem chi tiết đơn',
+
   'sales.create': 'Tạo đơn',
   'sales.debt.adjust': 'Điều chỉnh công nợ khách hàng',
   'sales.invoice': 'Quản lý hóa đơn',
@@ -67,18 +70,21 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   'reports.picker': 'Xem thống kê hiệu suất của nhân viên soạn hàng.',
   'reports.view': 'Xem các báo cáo tổng hợp của hệ thống.',
 
+  'customer_debt.view': 'Xem danh sách khách hàng, công nợ và lịch sử công nợ.',
+  'order_detail.view': 'Xem danh sách và chi tiết đơn hàng.',
+
   'sales.create': 'Tạo đơn hàng mới cho khách.',
   'sales.debt.adjust': 'Tăng hoặc giảm công nợ khách hàng và tạo lịch sử điều chỉnh.',
   'sales.invoice': 'Xem, lập, chỉnh sửa và chốt hóa đơn.',
   'sales.pick': 'Nhận đơn, soạn hàng, giữ tồn và nhả đơn.',
   'sales.returns': 'Tạo và xử lý các đơn hàng trả.',
   'sales.ship': 'Theo dõi và cập nhật trạng thái giao hàng.',
-  'sales.view': 'Xem đơn hàng, khách hàng và dữ liệu bán hàng.',
+  'sales.view': 'Xem chi tiết đơn và dữ liệu bán hàng.',
 }
 
 export const PERMISSION_GROUPS: Array<{ title: string; codes: string[] }> = [
   { title: 'Quản trị', codes: ['admin.roles', 'admin.users'] },
-  { title: 'Bán hàng', codes: ['sales.view', 'sales.create', 'sales.pick', 'sales.ship', 'sales.invoice', 'sales.returns', 'sales.debt.adjust', 'order.delete'] },
+  { title: 'Bán hàng', codes: ['order_detail.view', 'sales.view', 'customer_debt.view', 'sales.create', 'sales.pick', 'sales.ship', 'sales.invoice', 'sales.returns', 'sales.debt.adjust', 'order.delete'] },
   { title: 'Sản xuất', codes: ['production.view', 'production.manage', 'production.settle'] },
   { title: 'Mua hàng / Phụ liệu', codes: ['materials.view', 'materials.manage', 'materials.settle'] },
   { title: 'Nhân sự', codes: ['hr.view', 'hr.manage', 'hr.payroll.approve'] },

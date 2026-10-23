@@ -48,7 +48,9 @@ def test_tung_settlement_and_pdf_are_partner_scoped(client, owner, db):
     assert settlement.partner_id == partner.id
     assert settlement.settlement_type == "TUNG_IN"
     assert settlement.media_id == media.id
-    assert media.object_key.startswith("private-media/TUNG_IN/")
+    assert media.object_key.startswith("partners/")
+    assert "/TUNG_IN/" in media.object_key
+    assert media.object_key.endswith(".pdf")
     assert db.scalar(select(Partner).where(Partner.partner_code == "NHAT_IN")) is None
 
 

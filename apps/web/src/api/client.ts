@@ -1,3 +1,9 @@
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
+
+export function apiUrl(path: string): string {
+  const normalized = path.startsWith('/') ? path : `/${path}`
+  return `${API_BASE}${normalized}`
+}
 const TOKEN_KEY = 'azalas.token'
 const REFRESH_KEY = 'azalas.refresh_token'
 
@@ -45,9 +51,9 @@ export async function api<T>(path: string, opts: Options = {}): Promise<{ data: 
     headers['Content-Type'] = 'application/json'
     body = JSON.stringify(opts.body)
   }
-  const res = await fetch(`/api/v1${path}${qs}`, { method: opts.method ?? 'GET', headers, body, signal: opts.signal })
+  const res = await fetch(apiUrl(`/api/v1${path}${qs}`), { method: opts.method ?? 'GET', headers, body, signal: opts.signal })
   if (res.status === 401 && !opts._retried && path !== '/auth/login' && path !== '/auth/refresh' && tokenStore.getRefresh()) {
-    const refreshed = await fetch('/api/v1/auth/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: tokenStore.getRefresh() }) })
+    const refreshed = await fetch(apiUrl('/api/v1/auth/refresh'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: tokenStore.getRefresh() }) })
     if (refreshed.ok) {
       const payload = await refreshed.json()
       tokenStore.set(payload.data.access_token); tokenStore.setRefresh(payload.data.refresh_token)
@@ -136,6 +142,13 @@ export type Customer = {
   last_order_date: string | null
   created_at: string | null
 }
+// Lookup tối thiểu cho form tạo đơn / chọn khách (KHÔNG chứa công nợ).
+export type CustomerLookup = {
+  id: string
+  customer_code: string
+  name: string
+  phone: string | null
+}
 export type CustomerDebtChange = {
   customer_id: string
   customer_code: string
@@ -194,7 +207,9 @@ export type CustomerOrderGalleryImage = {
   id: string
   url: string
   view_url?: string
+  thumbnail_url?: string
   original_name: string | null
+  content_type?: string | null
   created_at: string | null
   uploaded_by_name: string | null
 }
@@ -219,6 +234,14 @@ export type CustomerOrderGalleryGroup = {
   date: string
   date_iso: string
   orders: CustomerOrderGalleryOrder[]
+}
+export type CustomerOrderGalleryMeta = {
+  summary?: { orders_with_images: number; total_images: number }
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+  next_page: number | null
 }
 export type QueueTab = 'NEW' | 'PICKING' | 'DEBT' | 'CUSTOMER_ORDER'
 export type QueueSection = {
@@ -780,6 +803,39 @@ export type Invoice = {
   captured_image: { id: string; url: string; view_url?: string; original_name: string | null; content_type: string | null } | null
 }
 
+export type InvoiceDetail = {
+  id: string; invoice_no: string; customer_id: string; status: string
+  created_at: string | null; issued_at: string
+  customer?: { id: string; customer_code: string; name: string; phone: string | null; address: string | null } | null
+  warehouse?: Warehouse | null
+  warehouses?: Warehouse[]
+  created_by?: { id: string; display_name: string } | null
+  orders?: Array<{ id: string; order_no: string; warehouse: Warehouse; created_date: string | null; delivery_date: string | null; status: string; billing_status: string; total_amount: number }>
+  items?: Array<{ order_no: string | null; name: string; sales_code: string | null; internal_code: string | null; color: string | null; size: string | null; quantity: number; unit_price_amount: number; line_total_amount: number }>
+  subtotal_amount: number; surcharge_amount: number; return_credit_amount: number
+  total_amount: number; paid_amount: number; balance_amount: number
+  debt_before_amount: number; debt_after_amount: number
+  old_debt_snapshot: number | null; old_debt_override: number | null; old_debt_applied_delta: number | null
+  invoice_image_path: string | null
+  payments?: Array<{ id: string; payment_no: string; paid_at: string | null; amount: number; allocated_amount: number; method: string; note: string | null }>
+  captured_invoice_media_id: string | null; captured_at: string | null
+  captured_image: { id: string; url: string; view_url?: string; original_name: string | null; content_type: string | null } | null
+  snapshot: any
+}
+
+export type DeletedOrderDetail = {
+  id: string; order_no: string
+  customer?: { id: string; customer_code: string; name: string }
+  warehouse?: Warehouse
+  created_at: string | null; created_date: string | null
+  previous_status: string; current_status: string; billing_status: string
+  total_amount: number
+  items?: Array<{ id: string; name: string; sales_code: string | null; internal_code: string | null; color: string | null; size: string | null; quantity: number; unit_price_amount: number; line_total_amount: number }>
+  related_invoice?: { id: string; invoice_no: string; status: string } | null
+  deleted_at: string | null; delete_reason: string | null
+  deleted_by?: { id: string; display_name: string } | null
+}
+
 export type InvoiceWorkQueue = {
   status: string
   total: number
@@ -819,6 +875,7 @@ export type InvoiceDraft = {
   orders: InvoiceDraftOrder[]
   subtotal_amount: number; surcharge_amount: number; return_credit_amount: number
   amount_due_before_payment: number; debt_before_amount: number; debt_after_before_payment: number
+  invoice_total_amount: number; total_debt_amount: number; received_amount: number; remaining_receivable: number
   old_debt_override: number | null
   note: string | null
   payments: Array<{ method: string; amount: number; note: string | null }>

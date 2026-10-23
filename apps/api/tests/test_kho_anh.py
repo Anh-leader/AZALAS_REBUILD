@@ -138,10 +138,10 @@ def test_customer_order_gallery_groups_children_and_deduplicates_images(client, 
 def test_customer_order_gallery_filters_search_date_and_status(client, owner, db):
     media_id = _upload(client, owner)["id"]
     order = _create(client, owner, db, [media_id])[0]
-    customer = db.get(Customer, order["customer_id"])
+    customer = db.get(Customer, uuid.UUID(order["customer_id"]))
     customer.name = "Khách hàng Ánh Dương"
     customer.customer_code = "KH-ANH-DUONG"
-    order_row = db.get(Order, order["id"])
+    order_row = db.get(Order, uuid.UUID(order["id"]))
     order_row.customer_note = "Ghi chú đặt hàng đặc biệt"
     order_row.status = "PICKING"
     creator_name = db.scalar(select(User.display_name).where(User.username == "owner"))
@@ -164,8 +164,8 @@ def test_customer_order_gallery_sorts_by_created_timestamp(client, owner, db):
     newer_media = _upload(client, owner, name="newer-order.jpg")
     older_order = _create(client, owner, db, [older_media["id"]])[0]
     newer_order = _create(client, owner, db, [newer_media["id"]])[0]
-    db.get(Order, older_order["id"]).created_at = datetime(2026, 10, 10, 10, tzinfo=TZ)
-    db.get(Order, newer_order["id"]).created_at = datetime(2026, 10, 12, 10, tzinfo=TZ)
+    db.get(Order, uuid.UUID(older_order["id"])).created_at = datetime(2026, 10, 10, 10, tzinfo=TZ)
+    db.get(Order, uuid.UUID(newer_order["id"])).created_at = datetime(2026, 10, 12, 10, tzinfo=TZ)
     db.commit()
 
     newest_first = _gallery(client, owner, sort="created_desc").json()["data"]
@@ -185,7 +185,7 @@ def test_customer_order_gallery_excludes_unavailable_media_and_deleted_orders(cl
     db.commit()
     _create(client, owner, db, [pending["id"], deleted["id"]])
     cancelled_order = _create(client, owner, db, [attached_to_deleted_order["id"]])[0]
-    db.get(Order, cancelled_order["id"]).status = "DELETED"
+    db.get(Order, uuid.UUID(cancelled_order["id"])).status = "DELETED"
     db.commit()
 
     response = _gallery(client, owner)

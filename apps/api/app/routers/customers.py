@@ -9,7 +9,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..core.deps import current_user
+from ..core.deps import current_user, require_permission
 from ..core.errors import ApiError
 from ..core.text import fold
 from ..models import Customer, DebtLedgerEntry, Order
@@ -63,7 +63,7 @@ def customer_dict(c: Customer, debt_amount: int = 0, last_date=None) -> dict:
 
 @router.get("")
 def list_customers(
-    q: str | None = None, sort: Sort = "debt_desc", db: Session = Depends(get_db), _=Depends(current_user)
+    q: str | None = None, sort: Sort = "debt_desc", db: Session = Depends(get_db), _=Depends(require_permission("customer_debt.view"))
 ):
     # Công nợ tính từ ledger, không lấy số chỉnh tay
     debt = (
@@ -96,7 +96,7 @@ def list_customers(
 
 
 @router.get("/debt-changes/today")
-def customer_debt_changes_today(db: Session = Depends(get_db), _=Depends(current_user)):
+def customer_debt_changes_today(db: Session = Depends(get_db), _=Depends(require_permission("customer_debt.view"))):
     today = datetime.now(BUSINESS_TZ).date()
     start = datetime.combine(today, datetime_time.min, tzinfo=BUSINESS_TZ).astimezone(timezone.utc)
     end = datetime.combine(today, datetime_time.max, tzinfo=BUSINESS_TZ).astimezone(timezone.utc)
@@ -181,8 +181,25 @@ def create_customer(body: CustomerIn, db: Session = Depends(get_db), _=Depends(c
     return {"data": customer_dict(c)}
 
 
+@router.get("/lookup")
+def lookup_customers(q: str | None = None, db: Session = Depends(get_db), _=Depends(require_permission("sales.view"))):
+    """Lookup tối thiểu cho form tạo đơn / chọn khách: KHÔNG trả công nợ.
+
+    Chỉ trả id, customer_code, name, phone. Endpoint đầy đủ (có debt) là GET /customers
+    và yêu cầu quyền customer_debt.view.
+    """
+    stmt = select(Customer).where(Customer.deleted_at.is_(None)).order_by(Customer.name)
+    qf = fold(q)
+    rows = [
+        {"id": str(c.id), "customer_code": c.customer_code, "name": c.name, "phone": c.phone}
+        for c in db.scalars(stmt).all()
+        if not qf or qf in fold(c.name) or qf in (c.phone or "") or qf in fold(c.customer_code)
+    ]
+    return {"data": rows}
+
+
 @router.get("/{customer_id}")
-def customer_detail(customer_id: str, db: Session = Depends(get_db), _=Depends(current_user)):
+def customer_detail(customer_id: str, db: Session = Depends(get_db), _=Depends(require_permission("customer_debt.view"))):
     try:
         import uuid
         parsed = uuid.UUID(customer_id)

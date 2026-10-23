@@ -1,0 +1,28 @@
+﻿{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "azalas-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "containers": [
+    {
+      "class_name": "AzalasApi",
+      "image": "../apps/api/Dockerfile",
+      "max_instances": 2,
+      "instance_type": "lite"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AZALAS_API",
+        "class_name": "AzalasApi"
+      }
+    ]
+  },
+  "exports": {
+    "AzalasApi": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

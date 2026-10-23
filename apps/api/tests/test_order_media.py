@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -26,7 +27,7 @@ def _customer(db):
 def _create(client, auth, db, *, media_ids, mode="TAN_XUAN"):
     return client.post("/api/v1/orders", headers={**auth, "Idempotency-Key": uuid.uuid4().hex}, json={
         "customer_id": str(_customer(db).id), "warehouse_mode": mode,
-        "created_date": "2026-10-10", "delivery_date": None,
+        "created_date": date.today().isoformat(), "delivery_date": None,
         "is_urgent": False, "customer_note": "Media test", "media_ids": [str(m) for m in media_ids],
     })
 
@@ -36,7 +37,7 @@ def test_upload_jpeg_creates_media_record(client, owner, db):
     row = db.get(MediaObject, uuid.UUID(media["id"]))
     assert row is not None
     assert row.content_type == "image/jpeg"
-    assert row.object_key.startswith("private-media/general/")
+    assert row.object_key.startswith("other/")
     assert row.object_key.endswith(f"/{media['id']}.jpg")
     assert row.storage_provider == "local"
     assert row.checksum == row.sha256
@@ -201,7 +202,7 @@ def test_r2_upload_and_view_use_private_signed_url(client, owner, db, monkeypatc
             pass
 
         def put(self, *, object_key, data, content_type):
-            assert object_key.startswith("private-media/general/")
+            assert object_key.startswith("other/")
             return StoredObject(storage_provider="r2", bucket="azalas-private", version_id="v1")
 
         def read(self, *, bucket, object_key):
@@ -209,7 +210,7 @@ def test_r2_upload_and_view_use_private_signed_url(client, owner, db, monkeypatc
 
         def signed_url(self, *, bucket, object_key):
             assert bucket == "azalas-private"
-            assert object_key.startswith("private-media/general/")
+            assert object_key.startswith("other/")
             return "https://r2.example.test/signed-object"
 
     monkeypatch.setattr("app.routers.media.get_storage_service", lambda driver=None: MockR2Storage())
@@ -219,7 +220,7 @@ def test_r2_upload_and_view_use_private_signed_url(client, owner, db, monkeypatc
     assert media is not None
     assert media.storage_provider == "r2"
     assert media.bucket == "azalas-private"
-    assert media.object_key.startswith("private-media/general/")
+    assert media.object_key.startswith("other/")
     assert media.checksum == media.sha256
 
     response = client.get(
@@ -309,16 +310,21 @@ def test_gallery_api_includes_view_url_for_r2_media(client, owner, db, monkeypat
         def __init__(self):
             pass
 
-        def put(self, *, object_key, data, content_type):
+        def put(self, *, object_key, data, content_type, cache_control=None):
             return StoredObject(storage_provider="r2", bucket="azalas-private")
 
         def read(self, *, bucket, object_key):
             raise AssertionError("Not used by this test")
 
+        def exists(self, *, bucket, object_key):
+            return False
+
         def signed_url(self, *, bucket, object_key):
             return "https://r2.example.test/signed-object"
 
-    monkeypatch.setattr("app.routers.media.get_storage_service", lambda driver=None: MockR2Storage())
+    mock_storage = lambda driver=None: MockR2Storage()  # noqa: E731
+    monkeypatch.setattr("app.routers.media.get_storage_service", mock_storage)
+    monkeypatch.setattr("app.services.media.get_storage_service", mock_storage)
     media = _upload(client, owner)
     response = _create(client, owner, db, media_ids=[media["id"]])
     assert response.status_code == 201, response.text
@@ -332,4 +338,7 @@ def test_gallery_api_includes_view_url_for_r2_media(client, owner, db, monkeypat
         for image in order["images"]
         if image["id"] == media["id"]
     )
-    assert image["view_url"] == media["view_url"]
+    # R2 media now exposes direct signed URLs so the browser loads R2/CDN
+    # without a backend proxy roundtrip.
+    assert image["view_url"] == "https://r2.example.test/signed-object"
+    assert image["thumbnail_url"] == "https://r2.example.test/signed-object"

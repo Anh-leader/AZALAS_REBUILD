@@ -5,6 +5,7 @@ from ..models import Permission, Role, RolePermission, User, UserRole
 
 ALL_PERMISSIONS = {
     "sales.view", "sales.create", "sales.pick", "sales.ship", "sales.invoice", "sales.returns", "sales.debt.adjust", "order.delete",
+    "order_detail.view", "customer_debt.view",
     "production.view", "production.manage", "production.settle", "materials.view", "materials.manage", "materials.settle",
     "hr.view", "hr.manage", "hr.payroll.approve", "reports.view", "reports.picker", "reports.audit",
     "admin.users", "admin.roles",
@@ -12,10 +13,10 @@ ALL_PERMISSIONS = {
 
 LEGACY_ROLE_PERMISSIONS = {
     "OWNER": {"*"}, "ADMIN": {"*"},
-    "KHO": {"sales.view", "sales.create", "sales.pick", "sales.ship", "production.view", "materials.view"},
-    "KE_TOAN": {"sales.view", "sales.invoice", "sales.returns", "sales.debt.adjust", "production.view", "production.settle", "materials.view", "materials.settle", "reports.view"},
+    "KHO": {"order_detail.view", "sales.view", "sales.create", "sales.pick", "sales.ship", "production.view", "materials.view"},
+    "KE_TOAN": {"order_detail.view", "sales.view", "sales.invoice", "sales.returns", "sales.debt.adjust", "customer_debt.view", "production.view", "production.settle", "materials.view", "materials.settle", "reports.view"},
     "NHAN_SU": {"hr.view", "hr.manage", "hr.payroll.approve", "reports.view"},
-    "MEMBER": {"sales.view"},
+    "MEMBER": {"order_detail.view", "sales.view"},
 }
 
 

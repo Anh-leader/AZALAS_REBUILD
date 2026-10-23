@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 12 * 60
     jwt_refresh_days: int = 14
     upload_dir: str = "uploads"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     storage_driver: str = "local"
     r2_account_id: str | None = None
     r2_access_key_id: str | None = None
@@ -31,6 +32,10 @@ class Settings(BaseSettings):
     @property
     def allowed_image_type_set(self) -> frozenset[str]:
         return frozenset(value.strip().lower() for value in self.allowed_image_types.split(",") if value.strip())
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 settings = Settings()

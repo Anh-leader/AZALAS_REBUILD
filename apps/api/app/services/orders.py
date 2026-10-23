@@ -14,6 +14,7 @@ from ..models import (
     InventoryBalance,
     InventoryReservation,
     InventoryReservationLine,
+    Invoice,
     InvoiceCapture,
     InvoiceDraft,
     InvoiceOrder,
@@ -28,18 +29,29 @@ from ..models import (
     User,
     Warehouse,
 )
-from .storage import media_view_url
+from .order_metrics import bucket_statuses
+from .storage import media_direct_url
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 WAREHOUSE_MODES = {"TAN_XUAN", "CA_KOI", "BOTH", "CUSTOMER_ORDER"}
 
-# Tab "Chi tiết đơn" -> điều kiện lọc (giữ đúng hành vi app cũ)
+# Business warehouse modes map to the two fixed warehouses by their stable name.
+# We resolve by name (not by `warehouses.code`) because the code differs between
+# environments: the dev seed uses TAN_XUAN/CA_KOI while the production migration
+# produced TX/CK. The Vietnamese name is the only stable business identifier.
+WAREHOUSE_NAME_BY_MODE = {
+    "TAN_XUAN": "Tân Xuân",
+    "CA_KOI": "Cá Koi",
+}
+
+# Tab "Chi tiết đơn" -> workflow bucket (status lấy tập trung từ order_metrics).
+# `order_type` chỉ tách riêng "Khách đặt" (CUSTOMER_ORDER) khỏi "Đơn mới".
 TABS = {
-    "NEW": {"status": "NEW", "order_type": "NORMAL"},
-    "PICKING": {"status": "PICKING", "order_type": None},
-    "DEBT": {"status": "DEBT_ORDER", "order_type": None},
-    "CUSTOMER_ORDER": {"status": "NEW", "order_type": "CUSTOMER_ORDER"},
+    "NEW": {"bucket": "new", "order_type": "NORMAL"},
+    "PICKING": {"bucket": "picking", "order_type": None},
+    "DEBT": {"bucket": "debt", "order_type": None},
+    "CUSTOMER_ORDER": {"bucket": "new", "order_type": "CUSTOMER_ORDER"},
 }
 
 
@@ -61,7 +73,28 @@ def _unique_order_no(db: Session) -> str:
 
 
 def _warehouses(db: Session) -> dict[str, Warehouse]:
-    return {w.code: w for w in db.scalars(select(Warehouse))}
+    return {w.name: w for w in db.scalars(select(Warehouse))}
+
+
+def _resolve_warehouses(db: Session, warehouse_mode: str) -> dict[str, Warehouse]:
+    """Resolve a business warehouse mode to its Warehouse rows, keyed by mode.
+
+    Raises a clear error when the required warehouse(s) are missing. Modes are
+    resolved by stable name (see ``WAREHOUSE_NAME_BY_MODE``) so both dev and
+    production warehouses are found regardless of their `code` value.
+    """
+    by_name = _warehouses(db)
+    tx = by_name.get(WAREHOUSE_NAME_BY_MODE["TAN_XUAN"])
+    ck = by_name.get(WAREHOUSE_NAME_BY_MODE["CA_KOI"])
+    if warehouse_mode == "BOTH":
+        if not tx or not ck:
+            raise ApiError(422, "WAREHOUSE_NOT_FOUND", "Không tìm thấy đủ hai kho để tạo đơn.")
+        return {"TAN_XUAN": tx, "CA_KOI": ck}
+    need = "CA_KOI" if warehouse_mode == "CA_KOI" else "TAN_XUAN"
+    row = ck if need == "CA_KOI" else tx
+    if not row:
+        raise ApiError(422, "WAREHOUSE_NOT_FOUND", "Không tìm thấy kho được chọn.")
+    return {need: row}
 
 
 def create_order(
@@ -132,13 +165,7 @@ def _create_order_rows(
     if len(media) != len(set(media_ids)):
         raise ApiError(422, "MEDIA_NOT_FOUND", "Ảnh đính kèm không hợp lệ.")
 
-    wh = _warehouses(db)
-    if warehouse_mode == "BOTH" and not {"TAN_XUAN", "CA_KOI"}.issubset(wh):
-        raise ApiError(422, "WAREHOUSE_NOT_FOUND", "Không tìm thấy đủ hai kho để tạo đơn.")
-    if warehouse_mode != "BOTH":
-        warehouse_code = "CA_KOI" if warehouse_mode == "CA_KOI" else "TAN_XUAN"
-        if warehouse_code not in wh:
-            raise ApiError(422, "WAREHOUSE_NOT_FOUND", "Không tìm thấy kho được chọn.")
+    wh = _resolve_warehouses(db, warehouse_mode)
     base_no = _unique_order_no(db)
     note = (customer_note or "").strip() or None
 
@@ -227,11 +254,11 @@ def create_orders_bulk(
     existing = list(db.scalars(select(Order).where(Order.idempotency_key.in_(keys)).order_by(Order.order_no)))
     expected_order_count = len(customers) * (2 if warehouse_mode == "BOTH" else 1)
     if existing:
-        expected_warehouse_codes = {
-            "TAN_XUAN": {"TAN_XUAN"},
-            "CA_KOI": {"CA_KOI"},
-            "CUSTOMER_ORDER": {"TAN_XUAN"},
-            "BOTH": {"TAN_XUAN", "CA_KOI"},
+        expected_warehouse_names = {
+            "TAN_XUAN": {WAREHOUSE_NAME_BY_MODE["TAN_XUAN"]},
+            "CA_KOI": {WAREHOUSE_NAME_BY_MODE["CA_KOI"]},
+            "CUSTOMER_ORDER": {WAREHOUSE_NAME_BY_MODE["TAN_XUAN"]},
+            "BOTH": {WAREHOUSE_NAME_BY_MODE["TAN_XUAN"], WAREHOUSE_NAME_BY_MODE["CA_KOI"]},
         }[warehouse_mode]
         expected_customers = set(customer_ids)
         existing_customers = {order.customer_id for order in existing}
@@ -240,7 +267,7 @@ def create_orders_bulk(
             existing_by_key.setdefault(order.idempotency_key or "", []).append(order)
         complete_per_customer = all(
             len(existing_by_key.get(key, [])) == (2 if warehouse_mode == "BOTH" else 1)
-            and {order.warehouse.code for order in existing_by_key.get(key, [])} == expected_warehouse_codes
+            and {order.warehouse.name for order in existing_by_key.get(key, [])} == expected_warehouse_names
             and len({order.customer_id for order in existing_by_key.get(key, [])}) == 1
             and next(iter({order.customer_id for order in existing_by_key.get(key, [])}), None) == customers[index]["customer_id"]
             for index, key in enumerate(keys)
@@ -257,12 +284,7 @@ def create_orders_bulk(
             "warehouse_code": order.warehouse.code,
         } for order in existing]
 
-    warehouses = _warehouses(db)
-    required_codes = {"TAN_XUAN", "CA_KOI"} if warehouse_mode == "BOTH" else {
-        "CA_KOI" if warehouse_mode == "CA_KOI" else "TAN_XUAN"
-    }
-    if not required_codes.issubset(warehouses):
-        raise ApiError(422, "WAREHOUSE_NOT_FOUND", "Không tìm thấy kho được chọn.")
+    _resolve_warehouses(db, warehouse_mode)
 
     # Validate every row's customer and media before writing the first order.
     normalized_rows = []
@@ -314,7 +336,7 @@ def _queue_query(tab: str, user: User):
     if tab not in TABS:
         raise ApiError(422, "INVALID_TAB", "Tab không hợp lệ.")
     rule = TABS[tab]
-    stmt = select(Order).where(Order.status == rule["status"])
+    stmt = select(Order).where(Order.status.in_(bucket_statuses(rule["bucket"])))
     if rule["order_type"]:
         stmt = stmt.where(Order.order_type == rule["order_type"])
     # App cũ: nhân viên thường chỉ thấy đơn mình đang soạn
@@ -386,9 +408,83 @@ def order_to_dict(o: Order) -> dict:
             "id": str(m.id),
             "original_name": m.original_name,
             "content_type": m.content_type,
-            "url": media_view_url(m.id),
-            "view_url": media_view_url(m.id),
+            "url": media_direct_url(m),
+            "view_url": media_direct_url(m),
         } for m in o.media],
+    }
+
+
+def deleted_order_detail(db: Session, *, order_id: uuid.UUID) -> dict:
+    """Chi tiết đơn đã xóa (read-only) cho tab Đơn đã xóa.
+
+    Metadata xóa (thời điểm, lý do, người xóa) không có cột riêng trên `orders`,
+    nên đọc từ audit_logs (before_data/after_data/actor_user_id/occurred_at).
+    """
+    order = db.scalar(select(Order).where(Order.id == order_id))
+    if not order:
+        raise ApiError(404, "ORDER_NOT_FOUND", "Không tìm thấy đơn hàng.")
+
+    items = list(db.scalars(select(OrderItem).where(
+        OrderItem.order_id == order.id, OrderItem.active.is_(True)
+    ).order_by(OrderItem.line_no)))
+
+    related_invoice = None
+    link = db.scalar(select(InvoiceOrder).where(InvoiceOrder.order_id == order.id))
+    if link:
+        invoice = db.get(Invoice, link.invoice_id)
+        if invoice:
+            related_invoice = {"id": str(invoice.id), "invoice_no": invoice.invoice_no, "status": invoice.status}
+
+    audit_row = db.scalar(select(AuditLog).where(
+        AuditLog.entity_type == "ORDER",
+        AuditLog.entity_id == order.id,
+        AuditLog.action.in_(("DELETE_PENDING", "DELETE_ORDER")),
+    ).order_by(AuditLog.occurred_at.desc(), AuditLog.created_at.desc()))
+    before = audit_row.before_data if audit_row and isinstance(audit_row.before_data, dict) else {}
+    after = audit_row.after_data if audit_row and isinstance(audit_row.after_data, dict) else {}
+
+    deleted_by = None
+    if audit_row and audit_row.actor_user_id:
+        actor = db.get(User, audit_row.actor_user_id)
+        deleted_by = {"id": str(actor.id), "display_name": actor.display_name} if actor else None
+    deleted_at = (audit_row.occurred_at if audit_row else None) or order.updated_at
+
+    return {
+        "id": str(order.id),
+        "order_no": order.order_no,
+        "customer": {
+            "id": str(order.customer.id), "customer_code": order.customer.customer_code,
+            "name": order.customer.name,
+        },
+        "warehouse": {"id": str(order.warehouse.id), "code": order.warehouse.code, "name": order.warehouse.name},
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+        "created_date": order.created_date.isoformat() if order.created_date else None,
+        "previous_status": before.get("status") or order.status,
+        "current_status": order.status,
+        "billing_status": order.billing_status,
+        "total_amount": order.total_amount,
+        "items": [{
+            "id": str(item.id),
+            "name": item.product_name_snapshot,
+            "sales_code": item.sales_code_snapshot,
+            "internal_code": item.internal_code_snapshot,
+            "color": item.color_snapshot,
+            "size": item.size_snapshot,
+            "quantity": int(item.quantity) if item.quantity == item.quantity.to_integral_value() else float(item.quantity),
+            "unit_price_amount": item.unit_price_amount,
+            "line_total_amount": item.line_total_amount,
+        } for item in items],
+        "images": [{
+            "id": str(m.id),
+            "original_name": m.original_name,
+            "content_type": m.content_type,
+            "url": media_direct_url(m),
+            "view_url": media_direct_url(m),
+        } for m in order.media],
+        "related_invoice": related_invoice,
+        "deleted_at": deleted_at.isoformat() if deleted_at else None,
+        "delete_reason": after.get("reason") or after.get("delete_reason") or None,
+        "deleted_by": deleted_by,
     }
 
 

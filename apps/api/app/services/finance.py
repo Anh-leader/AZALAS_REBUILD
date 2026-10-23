@@ -16,8 +16,11 @@ from ..models import (
     InvoiceDraft, InvoiceOrder, MediaObject, Order, OrderItem, PartyDebtBalance, Payment,
     PaymentAllocation, ReturnItem, ReturnRecord, User,
 )
+from .invoice_math import invoice_total as calc_invoice_total
+from .invoice_math import remaining_receivable as calc_remaining_receivable
+from .invoice_math import total_debt as calc_total_debt
 from .orders import order_to_dict
-from .storage import media_view_url
+from .storage import media_direct_url
 
 ELIGIBLE_ORDER_STATUSES = {"PICKED", "SHIPPING", "COMPLETED"}
 OPEN_BILLING_STATUSES = {"DRAFT", "READY"}
@@ -148,7 +151,7 @@ def preview_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid
         order_rows.append({
             "id": str(order.id), "order_no": order.order_no, "amount": amount,
             "status": order.status, "billing_status": order.billing_status,
-            "images": [{"id": str(m.id), "url": media_view_url(m.id), "view_url": media_view_url(m.id), "original_name": m.original_name}
+            "images": [{"id": str(m.id), "url": media_direct_url(m), "view_url": media_direct_url(m), "original_name": m.original_name}
                        for m in order.media],
             "items": [{
                 "id": str(item.id), "product_variant_id": str(item.product_variant_id) if item.product_variant_id else None,
@@ -159,14 +162,19 @@ def preview_invoice(db: Session, *, customer_id: uuid.UUID, order_ids: list[uuid
             } for item in items],
         })
     return_credit = sum(row.total_credit_amount for row in selected_returns)
-    due = max(subtotal + surcharge_amount - return_credit, 0)
+    due = calc_invoice_total(subtotal, surcharge_amount, return_credit)
+    total_debt_amount = calc_total_debt(debt_before, due)
     return {
         "customer": {"id": str(customer.id), "customer_code": customer.customer_code, "name": customer.name,
                      "phone": customer.phone, "address": customer.address},
         "orders": order_rows, "subtotal_amount": subtotal, "surcharge_amount": surcharge_amount,
         "return_credit_amount": return_credit, "amount_due_before_payment": due,
         "debt_before_amount": debt_before,
-        "debt_after_before_payment": debt_before + subtotal + surcharge_amount - return_credit,
+        "invoice_total_amount": due,
+        "total_debt_amount": total_debt_amount,
+        "received_amount": 0,
+        "remaining_receivable": calc_remaining_receivable(total_debt_amount, 0),
+        "debt_after_before_payment": total_debt_amount,
         "available_returns": [{"id": str(row.id), "return_no": row.return_no,
                                "amount": row.total_credit_amount, "note": row.note}
                               for row in available_returns],
@@ -187,9 +195,15 @@ def _invoice_dict(invoice: Invoice, db: Session) -> dict:
         media = db.get(MediaObject, invoice.captured_invoice_media_id)
         if media:
             captured_image = {
-                "id": str(media.id), "url": media_view_url(media.id), "view_url": media_view_url(media.id),
+                "id": str(media.id), "url": media_direct_url(media), "view_url": media_direct_url(media),
                 "original_name": media.original_name, "content_type": media.content_type,
             }
+    invoice_total_amount = calc_invoice_total(
+        invoice.subtotal_amount, invoice.surcharge_amount, invoice.return_credit_amount
+    )
+    total_debt_amount = calc_total_debt(invoice.debt_before_amount, invoice_total_amount)
+    received_amount = allocated
+    remaining = calc_remaining_receivable(total_debt_amount, received_amount)
     return {
         "id": str(invoice.id), "invoice_no": invoice.invoice_no, "customer_id": str(invoice.customer_id),
         "status": invoice.status, "issued_at": invoice.issued_at.isoformat() if invoice.issued_at else None,
@@ -197,11 +211,101 @@ def _invoice_dict(invoice: Invoice, db: Session) -> dict:
         "return_credit_amount": invoice.return_credit_amount, "paid_amount": invoice.paid_amount,
         "balance_amount": invoice.balance_amount, "debt_before_amount": invoice.debt_before_amount,
         "debt_after_amount": invoice.debt_after_amount, "note": invoice.note, "version": invoice.version,
+        "invoice_total_amount": invoice_total_amount, "total_debt_amount": total_debt_amount,
+        "received_amount": received_amount, "remaining_receivable": remaining,
         "order_ids": [str(link.order_id) for link in order_links], "allocated_amount": allocated,
         "unallocated_credit_amount": max(payment_total - allocated, 0), "snapshot": invoice.snapshot,
         "captured_invoice_media_id": str(invoice.captured_invoice_media_id) if invoice.captured_invoice_media_id else None,
         "captured_at": invoice.captured_at.isoformat() if invoice.captured_at else None,
         "captured_image": captured_image,
+    }
+
+
+def invoice_detail_dict(invoice: Invoice, db: Session) -> dict:
+    """Chi tiết hóa đơn (read-only) cho màn Trung tâm hóa đơn.
+
+    Không thay đổi schema: chi tiết sản phẩm đọc từ snapshot hiện có, lịch sử
+    thanh toán đọc từ PaymentAllocation/Payment, ảnh đọc từ captured media.
+    """
+    base = _invoice_dict(invoice, db)
+    snapshot = invoice.snapshot or {}
+
+    customer = db.get(Customer, invoice.customer_id)
+    creator = db.get(User, invoice.created_by) if invoice.created_by else None
+
+    order_links = list(db.scalars(select(InvoiceOrder).where(InvoiceOrder.invoice_id == invoice.id)))
+    orders: list[dict] = []
+    warehouses: dict[uuid.UUID, dict] = {}
+    for link in order_links:
+        order = db.get(Order, link.order_id)
+        if not order:
+            continue
+        warehouse = {"id": str(order.warehouse.id), "code": order.warehouse.code, "name": order.warehouse.name}
+        warehouses[order.warehouse.id] = warehouse
+        orders.append({
+            "id": str(order.id),
+            "order_no": order.order_no,
+            "warehouse": warehouse,
+            "created_date": order.created_date.isoformat() if order.created_date else None,
+            "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None,
+            "status": order.status,
+            "billing_status": order.billing_status,
+            "total_amount": order.total_amount,
+        })
+
+    items: list[dict] = []
+    for order_row in snapshot.get("orders") or []:
+        order_no = order_row.get("order_no")
+        for item in order_row.get("items") or []:
+            items.append({
+                "order_no": order_no,
+                "name": item.get("name"),
+                "sales_code": item.get("sales_code"),
+                "internal_code": item.get("internal_code"),
+                "color": item.get("color"),
+                "size": item.get("size"),
+                "quantity": item.get("quantity"),
+                "unit_price_amount": item.get("unit_price_amount"),
+                "line_total_amount": item.get("line_total_amount"),
+            })
+
+    payment_rows = list(db.execute(
+        select(Payment, PaymentAllocation.allocated_amount).join(
+            PaymentAllocation, PaymentAllocation.payment_id == Payment.id
+        ).where(
+            PaymentAllocation.target_type == "INVOICE",
+            PaymentAllocation.target_id == invoice.id,
+            Payment.status == "POSTED",
+        ).order_by(Payment.paid_at, Payment.created_at)
+    ).all())
+    payments = [{
+        "id": str(payment.id),
+        "payment_no": payment.payment_no,
+        "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+        "amount": payment.amount,
+        "allocated_amount": allocated,
+        "method": payment.method,
+        "note": payment.note,
+    } for payment, allocated in payment_rows]
+
+    return {
+        **base,
+        "customer": {
+            "id": str(customer.id), "customer_code": customer.customer_code,
+            "name": customer.name, "phone": customer.phone, "address": customer.address,
+        } if customer else snapshot.get("customer"),
+        "warehouse": next(iter(warehouses.values()), None),
+        "warehouses": list(warehouses.values()),
+        "created_at": invoice.created_at.isoformat() if invoice.created_at else None,
+        "created_by": {"id": str(creator.id), "display_name": creator.display_name} if creator else None,
+        "orders": orders,
+        "items": items,
+        "total_amount": invoice.subtotal_amount + invoice.surcharge_amount,
+        "old_debt_snapshot": snapshot.get("old_debt_snapshot"),
+        "old_debt_override": snapshot.get("old_debt_override"),
+        "old_debt_applied_delta": snapshot.get("old_debt_applied_delta"),
+        "invoice_image_path": snapshot.get("invoice_image_path"),
+        "payments": payments,
     }
 
 
@@ -693,14 +797,79 @@ def invoice_work_queue(db: Session, *, status: str, q: str | None) -> dict:
         invoices = list(db.scalars(select(Invoice).where(
             Invoice.status.in_(("SENT", "PAID", "PARTIALLY_PAID"))
         ).order_by(Invoice.issued_at.desc())))
+        if not invoices:
+            return {"status": status, "groups": [], "total": 0}
+
+        invoice_ids = [inv.id for inv in invoices]
+
+        # Batch: order_ids theo từng hóa đơn (chỉ cần id cho summary list).
+        link_rows = db.execute(select(InvoiceOrder.invoice_id, InvoiceOrder.order_id).where(
+            InvoiceOrder.invoice_id.in_(invoice_ids)
+        )).all()
+        order_ids_by_invoice: dict[uuid.UUID, list[str]] = {}
+        for invoice_id, order_id in link_rows:
+            order_ids_by_invoice.setdefault(invoice_id, []).append(str(order_id))
+
+        # Batch: tổng allocated theo invoice.
+        alloc_rows = db.execute(select(
+            PaymentAllocation.target_id, func.coalesce(func.sum(PaymentAllocation.allocated_amount), 0)
+        ).where(PaymentAllocation.target_type == "INVOICE",
+                PaymentAllocation.target_id.in_(invoice_ids))
+         .group_by(PaymentAllocation.target_id)).all()
+        allocated_by = {target_id: int(total) for target_id, total in alloc_rows}
+
+        # Batch: tổng payment POSTED theo invoice.
+        pay_rows = db.execute(select(
+            PaymentAllocation.target_id, func.coalesce(func.sum(Payment.amount), 0)
+        ).join(Payment, PaymentAllocation.payment_id == Payment.id)
+         .where(PaymentAllocation.target_type == "INVOICE",
+                PaymentAllocation.target_id.in_(invoice_ids), Payment.status == "POSTED")
+         .group_by(PaymentAllocation.target_id)).all()
+        paid_by = {target_id: int(total) for target_id, total in pay_rows}
+
+        # Batch: media ảnh hóa đơn (chỉ metadata, không fetch bytes/R2 object).
+        media_ids = [inv.captured_invoice_media_id for inv in invoices if inv.captured_invoice_media_id]
+        media_by_id: dict[uuid.UUID, MediaObject] = {}
+        if media_ids:
+            media_by_id = {m.id: m for m in db.scalars(select(MediaObject).where(MediaObject.id.in_(media_ids)))}
+
+        # Batch: tên khách hàng (fallback khi snapshot thiếu tên).
+        customer_ids = [inv.customer_id for inv in invoices]
+        customer_by_id = {c.id: c for c in db.scalars(select(Customer).where(Customer.id.in_(customer_ids)))}
+
         groups: dict[uuid.UUID, dict] = {}
-        for invoice in invoices:
-            entry = _invoice_dict(invoice, db)
-            name = (entry.get("snapshot") or {}).get("customer", {}).get("name") or ""
-            if qf and qf not in fold(name) and qf not in fold(invoice.invoice_no):
+        for inv in invoices:
+            snapshot = inv.snapshot or {}
+            customer = customer_by_id.get(inv.customer_id)
+            name = (snapshot.get("customer") or {}).get("name") or (customer.name if customer else "")
+            if qf and qf not in fold(name) and qf not in fold(inv.invoice_no):
                 continue
-            group = groups.setdefault(invoice.customer_id, {
-                "customer_id": str(invoice.customer_id), "customer_name": name, "invoices": [],
+            allocated = allocated_by.get(inv.id, 0)
+            payment_total = paid_by.get(inv.id, 0)
+            captured_image = None
+            media = media_by_id.get(inv.captured_invoice_media_id) if inv.captured_invoice_media_id else None
+            if media:
+                captured_image = {
+                    "id": str(media.id), "url": media_direct_url(media), "view_url": media_direct_url(media),
+                    "original_name": media.original_name, "content_type": media.content_type,
+                }
+            entry = {
+                "id": str(inv.id), "invoice_no": inv.invoice_no, "customer_id": str(inv.customer_id),
+                "status": inv.status, "issued_at": inv.issued_at.isoformat() if inv.issued_at else None,
+                "subtotal_amount": inv.subtotal_amount, "surcharge_amount": inv.surcharge_amount,
+                "return_credit_amount": inv.return_credit_amount, "paid_amount": inv.paid_amount,
+                "balance_amount": inv.balance_amount, "debt_before_amount": inv.debt_before_amount,
+                "debt_after_amount": inv.debt_after_amount, "note": inv.note, "version": inv.version,
+                "order_ids": order_ids_by_invoice.get(inv.id, []), "allocated_amount": allocated,
+                "unallocated_credit_amount": max(payment_total - allocated, 0),
+                # List chỉ cần tên khách, không trả full snapshot chi tiết.
+                "snapshot": {"customer": {"name": name}},
+                "captured_invoice_media_id": str(inv.captured_invoice_media_id) if inv.captured_invoice_media_id else None,
+                "captured_at": inv.captured_at.isoformat() if inv.captured_at else None,
+                "captured_image": captured_image,
+            }
+            group = groups.setdefault(inv.customer_id, {
+                "customer_id": str(inv.customer_id), "customer_name": name, "invoices": [],
             })
             group["invoices"].append(entry)
         rows = sorted(groups.values(), key=lambda g: g["customer_name"])
@@ -764,7 +933,7 @@ def capture_invoice_image(db: Session, *, customer_id: uuid.UUID, order_ids: lis
     db.commit()
     return {
         "id": str(capture.id), "media_id": str(media_id),
-        "url": media_view_url(media_id), "view_url": media_view_url(media_id), "original_name": media.original_name,
+        "url": media_direct_url(media), "view_url": media_direct_url(media), "original_name": media.original_name,
         "content_type": media.content_type,
     }
 
@@ -791,7 +960,7 @@ def get_invoice_capture(db: Session, *, customer_id: uuid.UUID, order_ids: list[
         raise ApiError(404, "MEDIA_NOT_FOUND", "Không tìm thấy ảnh hóa đơn đã chụp.")
     return {
         "id": str(capture.id), "media_id": str(media.id),
-        "url": media_view_url(media.id), "view_url": media_view_url(media.id), "original_name": media.original_name,
+        "url": media_direct_url(media), "view_url": media_direct_url(media), "original_name": media.original_name,
         "content_type": media.content_type,
     }
 
@@ -813,7 +982,7 @@ def _build_draft_snapshot(db: Session, customer: Customer, orders: list[Order],
             "status": order.status, "billing_status": order.billing_status,
             "delivery_date": order.delivery_date.isoformat() if order.delivery_date else None,
             "customer_note": order.customer_note,
-            "images": [{"id": str(m.id), "url": media_view_url(m.id), "view_url": media_view_url(m.id),
+            "images": [{"id": str(m.id), "url": media_direct_url(m), "view_url": media_direct_url(m),
                         "original_name": m.original_name} for m in order.media],
             "items": [{
                 "id": str(item.id), "order_id": str(order.id),
@@ -856,10 +1025,17 @@ def _draft_dict(draft: InvoiceDraft, db: Session) -> dict:
         media = db.get(MediaObject, draft.capture_media_id)
         if media:
             captured_image = {
-                "id": str(media.id), "url": media_view_url(media.id), "view_url": media_view_url(media.id),
+                "id": str(media.id), "url": media_direct_url(media), "view_url": media_direct_url(media),
                 "original_name": media.original_name, "content_type": media.content_type,
             }
     snapshot = draft.snapshot or {}
+    payments = draft.payments or []
+    received_amount = sum(int(p.get("amount") or 0) for p in payments)
+    invoice_total_amount = calc_invoice_total(
+        snapshot.get("subtotal_amount", 0), draft.surcharge_amount, snapshot.get("return_credit_amount", 0)
+    )
+    total_debt_amount = calc_total_debt(snapshot.get("debt_before_amount", 0), invoice_total_amount)
+    remaining_receivable = calc_remaining_receivable(total_debt_amount, received_amount)
     return {
         "id": str(draft.id), "customer_id": str(draft.customer_id),
         "order_ids": [str(x) for x in (draft.order_ids or [])],
@@ -871,9 +1047,13 @@ def _draft_dict(draft: InvoiceDraft, db: Session) -> dict:
         "amount_due_before_payment": snapshot.get("amount_due_before_payment", 0),
         "debt_before_amount": snapshot.get("debt_before_amount", 0),
         "debt_after_before_payment": snapshot.get("debt_after_before_payment", 0),
+        "invoice_total_amount": invoice_total_amount,
+        "total_debt_amount": total_debt_amount,
+        "received_amount": received_amount,
+        "remaining_receivable": remaining_receivable,
         "old_debt_override": draft.old_debt_override,
         "note": draft.note,
-        "payments": draft.payments or [],
+        "payments": payments,
         "capture_status": draft.capture_status,
         "capture_media_id": str(draft.capture_media_id) if draft.capture_media_id else None,
         "captured_image": captured_image,

@@ -135,6 +135,30 @@ def test_edit_old_debt_recomputes_invoice_totals(client, owner, db):
     assert updated["debt_after_before_payment"] == 777000 + 100000
 
 
+def test_draft_exposes_correct_remaining_receivable(client, owner, db):
+    customer = db.scalar(select(Customer).order_by(Customer.id))
+    order = _create_picked(client, owner, db, customer_id=customer.id, quantity=2, price=50000)
+    draft = _draft(client, owner, customer.id, [order.id])
+
+    # Không có phiếu thu: remaining = total_debt (nợ cũ + hóa đơn), KHÔNG phải chỉ invoice_total.
+    assert draft["invoice_total_amount"] == 100000
+    assert draft["total_debt_amount"] == draft["debt_before_amount"] + 100000
+    assert draft["received_amount"] == 0
+    assert draft["remaining_receivable"] == draft["total_debt_amount"]
+
+    # Có nợ cũ + thu một phần: remaining = old_debt + invoice_total - received.
+    r = client.patch(f"/api/v1/invoices/drafts/{draft['id']}", headers=owner, json={
+        "old_debt_override": 500000,
+        "payments": [{"method": "CASH", "amount": 200000, "note": None}],
+    })
+    assert r.status_code == 200, r.text
+    updated = r.json()["data"]
+    assert updated["invoice_total_amount"] == 100000
+    assert updated["total_debt_amount"] == 600000
+    assert updated["received_amount"] == 200000
+    assert updated["remaining_receivable"] == 400000
+
+
 def test_edit_non_integral_line_total_rejected(client, owner, db):
     customer = db.scalar(select(Customer).order_by(Customer.id))
     order = _create_picked(client, owner, db, customer_id=customer.id, quantity=2, price=50000)

@@ -894,6 +894,11 @@ h1 { font-size: 20px; margin: 6px 0 16px; font-weight: 900; }
 .kho-anh-skeleton-order i { aspect-ratio: 1; border-radius: 7px; background: #edf2f7; }
 @keyframes kho-anh-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .kho-anh-state { display: grid; justify-items: center; gap: 10px; padding: 38px 12px; color: var(--text-muted); text-align: center; }
+.kho-anh-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 18px 4px 4px; }
+.kho-anh-pagination .btn-outline:disabled { opacity: .45; cursor: not-allowed; }
+.kho-anh-page-indicator { font-size: 13px; font-weight: 600; color: var(--text-muted); min-width: 64px; text-align: center; }
+.kho-anh-load-more { display: flex; align-items: center; justify-content: center; min-height: 48px; padding: 16px 4px; font-size: 13px; font-weight: 600; color: var(--text-muted); }
+.kho-anh-load-more-end { color: var(--text-muted); opacity: .7; }
 @media (max-width: 950px) { .kho-anh-order-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.kho-anh-tools { grid-template-columns: minmax(200px, 1fr) minmax(140px, .6fr); } }
 @media (max-width: 650px) {
   .kho-anh-hero { margin: 4px 8px 12px; padding: 15px; }
@@ -934,9 +939,27 @@ h1 { font-size: 20px; margin: 6px 0 16px; font-weight: 900; }
 .invoice-deleted-list, .invoice-sent-list { border-top: 1px solid var(--pc-border); }
 .invoice-deleted-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-top: 1px solid #edf1f5; }
 .invoice-deleted-row span { display: grid; gap: 3px; }.invoice-deleted-row small { color: var(--text-muted); }
-.invoice-sent-row { display: grid; grid-template-columns: 1fr 64px 120px 100px 60px; gap: 10px; align-items: center; padding: 10px 14px; border-top: 1px solid #edf1f5; }
+.invoice-sent-row { display: grid; grid-template-columns: 1fr 64px 120px 100px auto; gap: 10px; align-items: center; padding: 10px 14px; border-top: 1px solid #edf1f5; }
 .invoice-sent-info { display: grid; gap: 3px; }.invoice-sent-info small { color: var(--text-muted); }
+.invoice-sent-actions { display: flex; gap: 6px; }
 .invoice-capture-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; border: 1px solid var(--pc-border); cursor: zoom-in; }
+
+.invoice-deleted-actions { display: flex; gap: 6px; }
+.invoice-detail-modal { gap: 0; padding: 0; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--pc-border); position: sticky; top: 0; background: #fff; border-radius: 16px 16px 0 0; z-index: 1; }
+.modal-head h2 { margin: 0; font-size: 16px; }
+.modal-close { width: 32px; height: 32px; border: 0; border-radius: 8px; background: #f1f5f9; color: var(--text-muted); font-size: 16px; cursor: pointer; display: grid; place-items: center; }
+.modal-close:hover { background: #e2e8f0; color: #0f172a; }
+.invoice-detail-body { padding: 16px 18px 20px; display: grid; gap: 14px; }
+.detail-section { display: grid; gap: 8px; }
+.detail-section h3 { margin: 0; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .4px; color: #43536a; display: flex; align-items: center; gap: 6px; }
+.detail-section h3 i { color: var(--primary); }
+.detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.detail-item { display: grid; gap: 3px; background: #f8fafc; border: 1px solid #e8edf3; border-radius: 9px; padding: 8px 10px; }
+.detail-item span { color: var(--text-muted); font-size: 10px; font-weight: 700; }
+.detail-item b { font-size: 13px; color: #172033; overflow-wrap: anywhere; }
+.detail-invoice-image { width: 100%; max-width: 420px; height: auto; max-height: 320px; object-fit: contain; border-radius: 10px; border: 1px solid var(--pc-border); cursor: zoom-in; background: #f1f5f9; }
+@media (max-width: 700px) { .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.detail-invoice-image { max-width: 100%; } }
 
 .invoice-form-layer { position: fixed; inset: 0; z-index: 1700; background: rgba(15,23,42,.55); overflow: auto; padding: 20px; }
 .invoice-form-card { max-width: 760px; margin: 0 auto; background: #fff; border-radius: 16px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,.3); }
@@ -967,7 +990,7 @@ h1 { font-size: 20px; margin: 6px 0 16px; font-weight: 900; }
 .invoice-capture-preview { width: 44px; height: 44px; object-fit: cover; border-radius: 7px; border: 1px solid var(--pc-border); cursor: zoom-in; }
 .invoice-capture-tools { display: grid; gap: 4px; justify-items: start; max-width: 230px; }
 .invoice-capture-tools small { color: var(--text-muted); font-size: 10px; }
-@media (max-width: 700px) { .invoice-tabs { grid-template-columns: 1fr; }.invoice-hero { flex-direction: column; align-items: flex-start; }.invoice-sent-row { grid-template-columns: 1fr 100px 60px; }.invoice-form-actions { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 700px) { .invoice-tabs { grid-template-columns: 1fr; }.invoice-hero { flex-direction: column; align-items: flex-start; }.invoice-sent-row { grid-template-columns: 1fr auto; }.invoice-capture-thumb { display: none; }.invoice-deleted-row { flex-wrap: wrap; gap: 8px; }.invoice-form-actions { grid-template-columns: 1fr 1fr; } }
 
 /* ---------- Hóa đơn: gộp theo khách + chi tiết (split flow) ---------- */
 .invoice-page-head { display: flex; align-items: center; gap: 14px; padding: 12px; }
@@ -1072,3 +1095,202 @@ h1 { font-size: 20px; margin: 6px 0 16px; font-weight: 900; }
 .delete-confirm-label { display: flex; align-items: center; gap: 8px; color: var(--text-main); font-size: 13px; font-weight: 700; cursor: pointer; }
 .delete-modal .delete-confirm { background: #b91c1c; border-color: #b91c1c; color: #fff; box-shadow: 0 4px 10px rgba(185, 28, 28, 0.3); }
 .delete-modal .delete-confirm:disabled { background: #94a3b8; border-color: #94a3b8; box-shadow: none; }
+
+/* ==========================================================================
+   AZALAS UI v2 — design tokens, reusable components, hierarchy & readability
+   (presentation-only: không đổi business logic / API / DB)
+   ========================================================================== */
+:root {
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-soft: #eff6ff;
+  --color-border: #cbd5e1;
+  --color-text: #0f172a;
+  --color-muted: #64748b;
+  --color-danger: #dc2626;
+  --color-danger-soft: #fff1f2;
+  --color-success: #16a34a;
+  --color-success-soft: #f0fdf4;
+  --color-warning: #d97706;
+  --color-warning-soft: #fffbeb;
+}
+
+/* ---------- Typography ---------- */
+body { font-size: 14.5px; color: var(--color-text); }
+.section-title { font-size: 16px; font-weight: 800; color: var(--color-text); }
+.muted { color: var(--color-muted); }
+.text-secondary { color: var(--color-muted); }
+
+/* ---------- Back button (nổi bật, thấy ngay khi vào trang) ---------- */
+.btn-back {
+  background: #fff;
+  color: var(--color-primary-hover);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+.btn-back:hover { background: var(--color-primary-soft); border-color: var(--color-primary); }
+.btn-back:active { transform: translateY(1px); }
+.btn-back:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---------- Buttons (hierarchy rõ ràng) ---------- */
+.btn-primary,
+.btn-main {
+  background: var(--color-primary);
+  color: #fff;
+  border: 1px solid var(--color-primary);
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-weight: 700;
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28);
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.btn-primary:hover,
+.btn-main:hover { background: var(--color-primary-hover); border-color: var(--color-primary-hover); }
+.btn-primary:disabled,
+.btn-main:disabled { background: #94a3b8; border-color: #94a3b8; box-shadow: none; cursor: not-allowed; }
+
+.btn-secondary,
+.btn-outline {
+  background: #fff;
+  color: var(--color-primary-hover);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-weight: 600;
+  font-size: 13px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.btn-secondary:hover,
+.btn-outline:hover { background: var(--color-primary-soft); border-color: var(--color-primary); color: var(--color-primary-hover); }
+.btn-secondary:disabled,
+.btn-outline:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-outline.btn-primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28); }
+.btn-outline.btn-primary:hover { background: var(--color-primary-hover); border-color: var(--color-primary-hover); }
+
+.btn-danger {
+  background: var(--color-danger-soft);
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-weight: 700;
+  font-size: 13px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.btn-danger:hover { background: #fee2e2; border-color: #fca5a5; }
+
+/* ---------- Status badge ---------- */
+.status-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 800; line-height: 1;
+  padding: 5px 10px; border-radius: 999px; white-space: nowrap;
+}
+.status-badge--sent { background: var(--color-primary-soft); color: var(--color-primary-hover); border: 1px solid #bfdbfe; }
+.status-badge--paid { background: var(--color-success-soft); color: var(--color-success); border: 1px solid #bbf7d0; }
+.status-badge--partially_paid { background: var(--color-warning-soft); color: var(--color-warning); border: 1px solid #fde68a; }
+.status-badge--deleted { background: var(--color-danger-soft); color: #b91c1c; border: 1px solid #fecaca; }
+.status-badge--neutral { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+
+/* ---------- Tab / filter button ---------- */
+.tabs button,
+.pick-order-tab,
+.invoice-tabs button {
+  font-weight: 700;
+  color: #334155;
+  background: #fff;
+  border: 1px solid var(--color-border);
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+.tabs button.active,
+.pick-order-tab.active {
+  background: var(--color-primary-soft);
+  border-color: var(--color-primary);
+  color: var(--color-primary-hover);
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.18);
+}
+.invoice-tabs button.active {
+  background: var(--color-primary-soft);
+  border-color: var(--color-primary);
+  color: var(--color-primary-hover);
+  font-weight: 700;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.18);
+}
+.invoice-tabs button.active i { color: var(--color-primary); }
+
+/* ---------- Card / section ---------- */
+.card { border: 1px solid #dbe3ef; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
+
+/* ---------- Header ---------- */
+.pc-kiot-brand img { width: 52px; height: 52px; }
+.pc-kiot-brand-title { font-size: 17px; }
+.pc-kiot-brand-sub { font-size: 12px; }
+.blue-header .title { font-size: 15px; font-weight: 800; }
+.blue-header { min-height: 48px; }
+
+/* ---------- Sidebar active ---------- */
+.pc-kiot-link.active {
+  background: linear-gradient(135deg, var(--color-primary) 0%, #0ea5e9 100%);
+  color: #fff;
+  border-radius: 10px;
+  box-shadow: 0 10px 22px rgba(14, 165, 233, 0.3);
+}
+.pc-kiot-link.active i { color: #fff; }
+.pc-kiot-nav-title { color: #93a4bd; }
+
+/* ==========================================================================
+   Trung tâm hóa đơn — layout rõ ràng, dễ scan
+   ========================================================================== */
+.invoice-center { max-width: 1180px; }
+.invoice-hero { margin: 12px 12px 16px; padding: 20px 22px; }
+.invoice-hero-copy b { font-size: 22px; }
+.invoice-hero-copy small { font-size: 13px; }
+.invoice-hero-icon { width: 58px; height: 58px; font-size: 26px; }
+.invoice-tabs { gap: 12px; padding: 0 12px 4px; }
+.invoice-tabs button { padding: 16px; border-radius: 14px; }
+.invoice-tabs button span { gap: 4px; }
+.invoice-tabs button b { font-size: 14px; }
+.invoice-tabs button small { font-size: 12px; }
+.invoice-search { margin: 14px 12px; max-width: 100%; width: min(560px, 100%); }
+.invoice-groups { gap: 12px; padding: 0 12px 24px; }
+.invoice-group { border-radius: 16px; border: 1px solid #dbe3ef; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05); margin-bottom: 4px; }
+.invoice-group-head { padding: 14px 16px; }
+.invoice-group-name b { font-size: 16px; font-weight: 700; }
+.invoice-group-name i { font-size: 20px; }
+.invoice-group-count { font-size: 12px; padding: 4px 12px; background: var(--color-primary-soft); color: var(--color-primary-hover); }
+
+.invoice-sent-row { display: flex; align-items: center; gap: 14px; padding: 12px 16px; }
+.invoice-sent-info { flex: 1; min-width: 0; }
+.invoice-sent-info b { font-size: 14px; font-weight: 700; }
+.invoice-sent-info small { font-size: 12px; color: var(--color-muted); }
+.invoice-sent-row strong { flex: 0 0 auto; min-width: 96px; text-align: right; font-size: 14px; }
+.invoice-sent-row .invoice-capture-thumb { flex: 0 0 56px; }
+.invoice-sent-row .status-badge { flex: 0 0 auto; }
+.invoice-sent-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.invoice-deleted-row span.invoice-deleted-actions { display: flex; gap: 8px; }
+.invoice-deleted-row span.status-badge { display: inline-flex; align-items: center; gap: 5px; }
+.invoice-deleted-row { padding: 12px 16px; gap: 12px; justify-content: flex-start; }
+.invoice-deleted-row > span:first-child { flex: 1; min-width: 0; }
+.invoice-deleted-row > span:first-child b { font-size: 14px; }
+.invoice-deleted-actions { display: flex; gap: 8px; }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 700px) {
+  .invoice-hero-copy b { font-size: 19px; }
+  .invoice-hero { flex-direction: column; align-items: flex-start; }
+  .invoice-tabs { grid-template-columns: 1fr; }
+  .invoice-sent-row { flex-wrap: wrap; gap: 10px; }
+  .invoice-sent-row .invoice-capture-thumb { display: none; }
+  .invoice-sent-actions, .invoice-deleted-actions { flex-wrap: wrap; }
+  .invoice-deleted-row { flex-wrap: wrap; gap: 8px; }
+}

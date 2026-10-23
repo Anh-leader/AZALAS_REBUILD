@@ -125,8 +125,13 @@ def finish_picking(order_id: uuid.UUID, db: Session = Depends(get_db), user: Use
 
 
 @router.get("/orders/{order_id}")
-def order_detail(order_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(current_user)):
+def order_detail(order_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_permission("order_detail.view"))):
     return {"data": inventory_svc.order_detail(db, order_id=order_id)}
+
+
+@router.get("/orders/{order_id}/deleted-detail")
+def deleted_order_detail(order_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(current_user)):
+    return {"data": svc.deleted_order_detail(db, order_id=order_id)}
 
 
 class DeleteOrderRequest(BaseModel):
@@ -163,7 +168,7 @@ def warehouses(db: Session = Depends(get_db), _=Depends(current_user)):
 
 @router.get("/order-work-queue")
 def work_queue(
-    tab: str = "NEW", q: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)
+    tab: str = "NEW", q: str | None = None, db: Session = Depends(get_db), user: User = Depends(require_permission("order_detail.view"))
 ):
     return {"data": svc.work_queue(db, tab=tab, q=q, user=user)}
 
@@ -174,7 +179,7 @@ def customer_queue(
     warehouse_id: uuid.UUID,
     tab: str = "NEW",
     db: Session = Depends(get_db),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission("order_detail.view")),
 ):
     return {
         "data": svc.customer_orders(db, customer_id=customer_id, warehouse_id=warehouse_id, tab=tab, user=user)

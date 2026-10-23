@@ -1,6 +1,6 @@
 import { useMemo, useState, type ChangeEvent, type ClipboardEvent, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, type Customer, type ProductionBatch, type ProductionMaster } from '../api/client'
+import { api, ApiError, type CustomerLookup, type ProductionBatch, type ProductionMaster } from '../api/client'
 import { uploadMediaFile } from '../api/media'
 import { formatMoney, todayIso } from '../lib/format'
 import { normalizeSize, parseColorLayers, parseQuantityExpression, SIZE_ORDER, type ColorLayers } from '../lib/rpParse'
@@ -24,7 +24,7 @@ function ratioDigits(ratio: string): number[] {
 
 export function CreateBatch({ master, onCreated, initialMode }: { master: ProductionMaster; onCreated: () => void; initialMode?: 'HOUSE' | 'CUSTOMER_ORDER' }) {
   const qc = useQueryClient()
-  const customers = useQuery({ queryKey: ['customers', 'production'], queryFn: () => api<Customer[]>('/customers', { query: { sort: 'name_asc' } }).then(r => r.data) })
+  const customers = useQuery({ queryKey: ['customers', 'production'], queryFn: () => api<CustomerLookup[]>('/customers/lookup').then(r => r.data) })
   const [mode, setMode] = useState<'HOUSE' | 'CUSTOMER_ORDER'>(initialMode ?? 'HOUSE')
   const [form, setForm] = useState({
     cut_date: todayIso(), workshop_id: '', cutting_team_id: '', pattern_code: '', product_id: '',

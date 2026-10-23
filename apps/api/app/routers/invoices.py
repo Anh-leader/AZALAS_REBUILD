@@ -192,7 +192,7 @@ def detail(invoice_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(curre
     invoice = db.get(Invoice, invoice_id)
     if not invoice:
         raise ApiError(404, "INVOICE_NOT_FOUND", "Không tìm thấy hóa đơn.")
-    return {"data": svc._invoice_dict(invoice, db)}
+    return {"data": svc.invoice_detail_dict(invoice, db)}
 
 
 @router.get("/{invoice_id}/print", response_class=HTMLResponse)

@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .core.config import settings
 from .core.db import engine
 from .core.errors import ApiError, api_error_handler
 from .routers import admin, auth, customers, dashboard, debt, embroidery, fabric, hr, inventory, invoices, materials, media, orders, payments, printing_partners, production, reports, returns, shipping, zippers
@@ -29,7 +30,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=settings.cors_origin_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )

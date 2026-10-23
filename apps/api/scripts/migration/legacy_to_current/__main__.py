@@ -64,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="Ghi dữ liệu vào NEW (sau pre-flight + gates)")
     parser.add_argument("--resume", action="store_true", help="Bỏ qua kiểm tra 'target rỗng'; tái sử dụng legacy_id_mapping")
     parser.add_argument("--verify-only", action="store_true", help="Chỉ kiểm tra NEW (counts + debt + invoice), không ghi")
+    parser.add_argument("--sync-status", action="store_true",
+                        help="Đồng bộ orders.status/billing_status từ OLD (dry-run; kèm --apply để ghi)")
+    parser.add_argument("--repair-debt", action="store_true",
+                        help="Đồng bộ OPENING debt ledger từ OLD (dry-run; kèm --apply để ghi)")
     parser.add_argument("--from-date", dest="from_date", default=None, metavar="YYYY-MM-DD",
                         help="Incremental: chỉ lấy dữ liệu từ ngày này (00:00 Asia/Ho_Chi_Minh, inclusive)")
     parser.add_argument("--to-date", dest="to_date", default=None, metavar="YYYY-MM-DD",
@@ -91,6 +95,24 @@ def main(argv: list[str] | None = None) -> int:
             applier.close()
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0 if result["ok"] else 1
+
+    if args.sync_status:
+        from .sync_status import sync_order_statuses
+
+        dry = not args.apply
+        print(f"[legacy_to_current] OLD={_host(old_url)} NEW={_host(new_url)} sync-status dry_run={dry}")
+        result = sync_order_statuses(old_url, new_url, dry_run=dry)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    if args.repair_debt:
+        from .repair_debt import repair_opening_debts
+
+        dry = not args.apply
+        print(f"[legacy_to_current] OLD={_host(old_url)} NEW={_host(new_url)} repair-debt dry_run={dry}")
+        result = repair_opening_debts(old_url, new_url, dry_run=dry)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
 
     if args.apply:
         temp_password = os.environ.get("MIGRATION_TEMP_PASSWORD") or file_env.get("MIGRATION_TEMP_PASSWORD") or ""

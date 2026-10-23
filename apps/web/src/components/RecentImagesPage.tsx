@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
   STATUS_LABEL,
   type CustomerOrderGalleryGroup,
+  type CustomerOrderGalleryMeta,
   type CustomerOrderGalleryOrder,
   type CustomerOrderGalleryStatus,
   type Invoice,
@@ -12,11 +13,11 @@ import {
 import { downloadAuthenticatedMedia } from '../api/media'
 import { formatDate, formatMoney } from '../lib/format'
 import { LazyImage } from './LazyImage'
+import { prefetchImage, usePrefetchImage } from './usePrefetchImage'
 import { useAuthenticatedMedia } from './useAuthenticatedMedia'
 
 type GallerySort = 'created_desc' | 'created_asc'
 type GalleryStatusFilter = '' | CustomerOrderGalleryStatus
-type GallerySummary = { orders_with_images: number; total_images: number }
 
 const GALLERY_STATUS_LABEL: Record<CustomerOrderGalleryStatus, string> = {
   NOT_PICKED: 'Chưa soạn',
@@ -42,28 +43,78 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
     return () => window.clearTimeout(timer)
   }, [search])
 
-  const query = useQuery({
+  const query = useInfiniteQuery({
     queryKey: ['customer-order-gallery', debouncedSearch, date, sort, status],
-    queryFn: async () => {
+    queryFn: async ({ pageParam }) => {
       const response = await api<CustomerOrderGalleryGroup[]>('/media/customer-order-gallery', {
         query: {
           days: '10',
-          limit: '1000',
+          page: String(pageParam),
+          page_size: '30',
           q: debouncedSearch || undefined,
           date: date || undefined,
           sort,
           status: status || undefined,
         },
       })
-      return {
-        groups: response.data,
-        summary: response.meta?.summary as GallerySummary,
-      }
+      return { groups: response.data, meta: response.meta as CustomerOrderGalleryMeta }
     },
+    initialPageParam: 1,
+    getNextPageParam: lastPage => (lastPage.meta.has_more ? lastPage.meta.next_page : undefined),
+    staleTime: 10 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    placeholderData: keepPreviousData,
   })
 
-  const groups = query.data?.groups ?? []
+  // Flatten all loaded pages and re-group by date so a date split across pages
+  // still renders as a single section, newest-first.
+  const { groups, summary } = useMemo(() => {
+    const byDate = new Map<string, { date: string; date_iso: string; orders: CustomerOrderGalleryOrder[] }>()
+    for (const page of query.data?.pages ?? []) {
+      for (const group of page.groups) {
+        let bucket = byDate.get(group.date_iso)
+        if (!bucket) {
+          bucket = { date: group.date, date_iso: group.date_iso, orders: [] }
+          byDate.set(group.date_iso, bucket)
+        }
+        bucket.orders.push(...group.orders)
+      }
+    }
+    return {
+      groups: [...byDate.values()],
+      summary: query.data?.pages[0]?.meta.summary,
+    }
+  }, [query.data])
+
   const hasFilters = Boolean(search.trim() || date || status)
+  const hasMore = Boolean(query.hasNextPage)
+  const isLoadingMore = query.isFetchingNextPage
+
+  // Infinite scroll: load the next page when the sentinel scrolls near the bottom.
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = sentinelRef.current
+    if (!el) return
+    if (!('IntersectionObserver' in window)) return
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(entry => entry.isIntersecting) && query.hasNextPage && !query.isFetchingNextPage) {
+          void query.fetchNextPage()
+        }
+      },
+      { rootMargin: '600px' },
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage])
+
+  // First 6 thumbnails on the page get fetchpriority="high" for fast first paint.
+  const highPriorityIds = new Set(
+    groups
+      .flatMap(group => group.orders.flatMap(order => order.images.slice(0, 4)))
+      .slice(0, 6)
+      .map(image => image.id),
+  )
   const orderDetail = useQuery({
     queryKey: ['order-detail', viewingOrderId],
     enabled: Boolean(viewingOrderId),
@@ -124,8 +175,8 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
           <p>Ảnh được nhóm theo ngày, mới nhất hiển thị trước.</p>
         </div>
         <div className="kho-anh-summary">
-          <SummaryCard label="ĐƠN CÓ ẢNH" value={query.isLoading ? null : query.data?.summary.orders_with_images ?? 0} icon="bi-bag-check"/>
-          <SummaryCard label="TỔNG ẢNH" value={query.isLoading ? null : query.data?.summary.total_images ?? 0} icon="bi-image"/>
+          <SummaryCard label="ĐƠN CÓ ẢNH" value={query.isLoading ? null : summary?.orders_with_images ?? 0} icon="bi-bag-check"/>
+          <SummaryCard label="TỔNG ẢNH" value={query.isLoading ? null : summary?.total_images ?? 0} icon="bi-image"/>
         </div>
       </div>
 
@@ -175,13 +226,18 @@ export function RecentImagesPage({ go }: { go: (page: 'dashboard') => void }) {
       {query.isSuccess && groups.map(group => <section className="kho-anh-group" key={group.date_iso}>
         <h3 className="kho-anh-date"><i className="bi bi-calendar3"/> {group.date}</h3>
         <div className="kho-anh-order-grid">
-          {group.orders.map(order => <OrderCard order={order} key={order.group_id} onImageClick={(index) => {
+          {group.orders.map(order => <OrderCard order={order} key={order.group_id} highPriorityIds={highPriorityIds} onImageClick={(index) => {
             setCopyNotice('')
             setViewingOrderId(null)
             setSelectedImage({ order, index })
           }}/>)}
         </div>
       </section>)}
+
+      {query.isSuccess && (hasMore || isLoadingMore) && <div ref={sentinelRef} className="kho-anh-load-more" role="status">
+        {isLoadingMore ? 'Đang tải thêm…' : 'Cuộn để xem thêm'}
+      </div>}
+      {query.isSuccess && !hasMore && groups.length > 0 && <div className="kho-anh-load-more kho-anh-load-more-end" role="status">Đã hiển thị hết ảnh</div>}
     </section>
     {selectedImage && <div className="kho-anh-lightbox" role="dialog" aria-modal="true" aria-label="Xem ảnh đơn hàng" onClick={() => { setSelectedImage(null); setViewingOrderId(null) }}>
       <button type="button" className="kho-anh-lightbox-close" aria-label="Đóng" onClick={() => { setSelectedImage(null); setViewingOrderId(null) }}>×</button>
@@ -261,10 +317,10 @@ function OrderDetailPanel({ detail, invoice, onBack }: {
       <div className="kho-anh-order-section-title">Hóa đơn liên quan</div>
       <div className="kho-anh-order-invoice-head"><b>{invoice.invoice_no}</b><span className="type-badge">{invoice.status}</span></div>
       <div className="kho-anh-order-invoice-grid">
-        <div><span>Tổng đơn hàng</span><b>{formatMoney(invoice.subtotal_amount)}</b></div>
+        <div><span>Tổng đơn hàng</span><b>{formatMoney(invoice.subtotal_amount + invoice.surcharge_amount - invoice.return_credit_amount)}</b></div>
         <div><span>Nợ cũ</span><b>{formatMoney(invoice.debt_before_amount)}</b></div>
-        <div><span>Tổng nợ</span><b>{formatMoney(invoice.debt_after_amount)}</b></div>
-        <div><span>Còn lại phải thu</span><b>{formatMoney(invoice.balance_amount)}</b></div>
+        <div><span>Tổng nợ</span><b>{formatMoney(invoice.debt_before_amount + invoice.subtotal_amount + invoice.surcharge_amount - invoice.return_credit_amount)}</b></div>
+        <div><span>Còn lại phải thu</span><b>{formatMoney(invoice.debt_after_amount)}</b></div>
       </div>
     </div>}
 
@@ -296,7 +352,11 @@ function SummaryCard({ label, value, icon }: { label: string; value: number | nu
   </article>
 }
 
-function OrderCard({ order, onImageClick }: { order: CustomerOrderGalleryOrder; onImageClick: (index: number) => void }) {
+function OrderCard({ order, highPriorityIds, onImageClick }: {
+  order: CustomerOrderGalleryOrder
+  highPriorityIds: Set<string>
+  onImageClick: (index: number) => void
+}) {
   const uploaders = [...new Set(order.images.map(image => image.uploaded_by_name).filter((name): name is string => Boolean(name)))]
   const createdBy = order.created_by_names.join(', ')
   const createdLabel = order.created_at
@@ -328,8 +388,11 @@ function OrderCard({ order, onImageClick }: { order: CustomerOrderGalleryOrder; 
     {uploaders.length > 0 && <p className="kho-anh-byline"><i className="bi bi-cloud-upload"/> Người tải ảnh: {uploaders.join(', ')}</p>}
     {order.note && <p className="kho-anh-note">{order.note}</p>}
     <div className="kho-anh-thumbnails" aria-label={`${order.image_count} ảnh của đơn ${order.order_no}`}>
-      {order.images.slice(0, 4).map((image, index) => <button type="button" className="kho-anh-thumb" key={image.id} aria-label={`Xem ảnh ${index + 1} của đơn ${order.order_no}`} onClick={() => onImageClick(index)}>
-        <LazyImage src={image.view_url ?? image.url} alt={image.original_name || `Ảnh ${index + 1} của ${order.customer_name}`}/>
+      {order.images.slice(0, 4).map((image, index) => <button type="button" className="kho-anh-thumb" key={image.id} aria-label={`Xem ảnh ${index + 1} của đơn ${order.order_no}`}
+        onMouseEnter={() => prefetchImage(image.view_url ?? image.url)}
+        onFocus={() => prefetchImage(image.view_url ?? image.url)}
+        onClick={() => onImageClick(index)}>
+        <LazyImage src={image.thumbnail_url ?? image.view_url ?? image.url} fallbackSrc={image.view_url ?? image.url} alt={image.original_name || `Ảnh ${index + 1} của ${order.customer_name}`} fetchPriority={highPriorityIds.has(image.id) ? 'high' : 'low'}/>
         {index === 3 && order.image_count > 4 && <span className="kho-anh-more">+{order.image_count - 3}</span>}
       </button>)}
     </div>
@@ -337,6 +400,22 @@ function OrderCard({ order, onImageClick }: { order: CustomerOrderGalleryOrder; 
 }
 
 function GalleryLargeImage({ src, alt }: { src: string; alt: string }) {
+  // Direct signed/public URL: load straight from R2/CDN, no blob, no proxy.
+  if (/^https?:\/\//i.test(src)) {
+    return <DirectLargeImage src={src} alt={alt}/>
+  }
+  return <AuthenticatedLargeImage src={src} alt={alt}/>
+}
+
+function DirectLargeImage({ src, alt }: { src: string; alt: string }) {
+  const [decodeFailed, setDecodeFailed] = useState(false)
+  useEffect(() => setDecodeFailed(false), [src])
+  usePrefetchImage(src)
+  if (decodeFailed) return <div className="kho-anh-lightbox-fallback">Ảnh lỗi</div>
+  return <img src={src} alt={alt} onError={() => setDecodeFailed(true)}/>
+}
+
+function AuthenticatedLargeImage({ src, alt }: { src: string; alt: string }) {
   const { source, failed } = useAuthenticatedMedia(src)
   const [decodeFailed, setDecodeFailed] = useState(false)
   useEffect(() => setDecodeFailed(false), [src])

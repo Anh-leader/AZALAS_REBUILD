@@ -22,8 +22,11 @@ import hashlib
 import uuid
 from datetime import datetime, time, timezone
 from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 from urllib.parse import urlparse
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -64,7 +67,44 @@ from .old import read_all
 from .incremental import RowFilter, build_filter
 from .runner import Runner, _money, _s
 
-HEAD_REVISION = "20261015_0022"
+def _resolve_head_and_lineage() -> tuple[str, frozenset[str]]:
+    """Đọc head + toàn bộ revision lineage từ chính Alembic script directory.
+
+    Không hard-code revision: mỗi khi thêm migration mới, head tự cập nhật theo
+    codebase thay vì phải sửa thủ công migration tool.
+    """
+    api_root = Path(__file__).resolve().parents[3]  # .../apps/api
+    cfg = Config()
+    cfg.set_main_option("script_location", str(api_root / "migrations"))
+    script = ScriptDirectory.from_config(cfg)
+    head = script.get_current_head()
+    lineage = frozenset(revision.revision for revision in script.walk_revisions())
+    return head, lineage
+
+
+HEAD_REVISION, VALID_LINEAGE = _resolve_head_and_lineage()
+
+
+def validate_target_revision(version: str | None) -> str | None:
+    """Kiểm tra revision của NEW so với codebase head (thuần, dễ test).
+
+    - NEW ở đúng head -> hợp lệ (không cần downgrade).
+    - NEW ở revision cũ hơn trong cùng lineage -> chưa migrate đủ.
+    - NEW ở revision ngoài lineage -> từ chối vì không xác định được schema.
+    """
+    if version is None:
+        return None
+    if version not in VALID_LINEAGE:
+        return (
+            f"NEW đang ở Alembic revision {version!r}, không thuộc lineage hợp lệ "
+            f"của codebase (head hiện tại {HEAD_REVISION!r})."
+        )
+    if version != HEAD_REVISION:
+        return (
+            f"NEW chưa migrate đủ: đang ở revision {version!r}, cần head {HEAD_REVISION!r}. "
+            "Chạy `alembic upgrade head` trên NEW rồi thử lại."
+        )
+    return None
 
 
 def _closure_rows(engine: Engine, row_filter) -> dict[str, list[dict]]:
@@ -203,8 +243,9 @@ class Applier:
         except Exception as exc:  # noqa: BLE001
             errors.append(f"NEW chưa có bảng alembic_version hoặc không đọc được: {exc}")
             version = None
-        if version != HEAD_REVISION:
-            errors.append(f"NEW đang ở Alembic revision {version!r}, cần {HEAD_REVISION!r}.")
+        revision_error = validate_target_revision(version)
+        if revision_error:
+            errors.append(revision_error)
 
         if not self.temp_password:
             errors.append("Thiếu env MIGRATION_TEMP_PASSWORD.")

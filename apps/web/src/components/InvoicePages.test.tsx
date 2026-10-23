@@ -55,6 +55,7 @@ function makeDraft(captureStatus: 'NONE' | 'READY' | 'STALE' = 'NONE'): InvoiceD
     ],
     subtotal_amount: 140000, surcharge_amount: 0, return_credit_amount: 0,
     amount_due_before_payment: 140000, debt_before_amount: 0, debt_after_before_payment: 140000,
+    invoice_total_amount: 140000, total_debt_amount: 140000, received_amount: 0, remaining_receivable: 140000,
     old_debt_override: null, note: null, payments: [],
     capture_status: captureStatus, capture_media_id: null, captured_image: null,
     finalized_invoice_id: null, finalized_at: null, version: 1,
@@ -195,6 +196,18 @@ describe('invoice split flow', () => {
     await act(async () => container.querySelector<HTMLButtonElement>('.invoice-group-submit')?.click())
     await waitForText('.pick-error', 'Đơn HD-B chưa có chi tiết soạn.')
     apiSpy.mockRestore()
+  })
+
+  it('computes remaining receivable from total debt, not invoice total alone', async () => {
+    draftState = { ...makeDraft('NONE'), amount_due_before_payment: 9, debt_before_amount: 5227,
+      debt_after_before_payment: 5236, invoice_total_amount: 9, total_debt_amount: 5236,
+      received_amount: 0, remaining_receivable: 5236 }
+    render(createElement(Routes, null,
+      createElement(Route, { path: '/invoices/draft/:draftId', element: createElement(InvoiceDetailPage) }),
+    ), '/invoices/draft/draft-1')
+    await waitForSelector('.bill-total-final')
+    expect(container.querySelector('.bill-total-final')?.textContent).toContain('5.236')
+    expect(container.querySelector('.bill-payment-foot')?.textContent).toContain('5.236')
   })
 
   it('keeps finalize disabled until capture, then enabled after capture', async () => {

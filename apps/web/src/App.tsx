@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { api, ApiError, STATUS_LABEL, type Customer, type CustomerDebtChange, type Order, type OrderDetail, type Overview, type QueueSection, type QueueTab, type User } from './api/client'
+import { api, ApiError, STATUS_LABEL, type Customer, type CustomerDebtChange, type CustomerLookup, type Order, type OrderDetail, type Overview, type QueueSection, type QueueTab, type User } from './api/client'
 import { uploadMediaFile } from './api/media'
 import { useAuth } from './api/auth'
 import { formatDate, formatDateShort, formatMoney, parseMoneyInput, todayIso, todayLabel } from './lib/format'
@@ -29,7 +29,7 @@ const PAGE_PATH: Record<Page, string> = {
 }
 type NavItem = [Page, string, string, string]
 const navSections: Array<[string, NavItem[]]> = [
-  ['Bán hàng', [['dashboard', 'bi-grid-1x2-fill', 'Tổng quan', 'sales.view'], ['create', 'bi-plus-circle-fill', 'Tạo đơn', 'sales.create'], ['orders', 'bi-card-checklist', 'Chi tiết đơn', 'sales.view'], ['shipping', 'bi-truck', 'Vận chuyển', 'sales.ship'], ['invoices', 'bi-receipt', 'Hóa đơn', 'sales.invoice'], ['returns', 'bi-arrow-return-left', 'Hàng trả', 'sales.returns'], ['images', 'bi-images', 'Kho ảnh', 'sales.view'], ['customers', 'bi-people-fill', 'Khách hàng / công nợ', 'sales.view']]],
+  ['Bán hàng', [['dashboard', 'bi-grid-1x2-fill', 'Tổng quan', 'sales.view'], ['create', 'bi-plus-circle-fill', 'Tạo đơn', 'sales.create'], ['orders', 'bi-card-checklist', 'Chi tiết đơn', 'order_detail.view'], ['shipping', 'bi-truck', 'Vận chuyển', 'sales.ship'], ['invoices', 'bi-receipt', 'Hóa đơn', 'sales.invoice'], ['returns', 'bi-arrow-return-left', 'Hàng trả', 'sales.returns'], ['images', 'bi-images', 'Kho ảnh', 'sales.view'], ['customers', 'bi-people-fill', 'Khách hàng / công nợ', 'customer_debt.view']]],
   ['Sản xuất', [['production', 'bi-scissors', 'QL Rập', 'production.view']]],
   ['Mua hàng', [['materials', 'bi-box-seam', 'Phụ liệu / mua hàng', 'materials.view']]],
   ['Nhân sự', [['hr', 'bi-person-badge', 'Nhân sự / lương', 'hr.view']]],
@@ -271,6 +271,7 @@ function Orders() {
   const navigate = useNavigate()
   const location = useLocation()
   const [searchParams, setSearchParams] = useSearchParams()
+  const canViewOrders = Boolean(user?.permissions?.includes('order_detail.view'))
   const tab = (searchParams.get('tab') as OrderView | null) ?? 'NEW'
   const q = searchParams.get('q') ?? ''
   const customerId = searchParams.get('customer_id')
@@ -300,12 +301,13 @@ function Orders() {
     const state: PickingRouteState = { customerName, orders, returnTo: path }
     navigate(`/orders/${order.id}/picking`, { state })
   }
+  if (!canViewOrders) return <section className="page"><Problem text="Bạn không có quyền xem chi tiết đơn."/></section>
   return <section className="page">
     <h1>Chi tiết đơn</h1>
     <div className="tabs">{tabs.map(([id, label]) => <button className={tab === id ? 'active' : ''} onClick={() => updateListState({ tab: id, customerId: null, warehouseId: null })} key={id}>{label}</button>)}</div>
     {isStats ? <PickerStatistics/> : <>
       <input className="form-control search" placeholder="Tìm mã đơn hoặc khách hàng…" value={q} onChange={e => updateListState({ q: e.target.value })}/>
-      {queue.isLoading ? <Loading/> : queue.error ? <Problem text={message(queue.error)}/> : <div className="queue-grid">{queue.data!.map(section => <div className="card warehouse" key={section.warehouse.id}><h2><span className={`type-badge ${section.warehouse.code === 'TAN_XUAN' ? 'badge-tan-xuan' : 'badge-ca-koi'}`}>{section.warehouse.name}</span><span className="count-pill">{section.order_count}</span></h2>{section.customers.map(c => <button className="customer-row" onClick={() => updateListState({ customerId: c.customer_id, warehouseId: section.warehouse.id })} key={c.customer_id}><i className="bi bi-person-circle"/><span><b>{c.customer_name}</b><small>{c.order_count} đơn</small></span>{c.has_urgent && <mark>GẤP</mark>}<i className="bi bi-chevron-right"/></button>)}</div>)}</div>}
+      {queue.isLoading ? <Loading/> : queue.error ? <Problem text={message(queue.error)}/> : queue.data!.length === 0 ? <div className="empty">Chưa có dữ liệu</div> : <div className="queue-grid">{queue.data!.map(section => <div className="card warehouse" key={section.warehouse.id}><h2><span className={`type-badge ${section.warehouse.code === 'TAN_XUAN' ? 'badge-tan-xuan' : 'badge-ca-koi'}`}>{section.warehouse.name}</span><span className="count-pill">{section.order_count}</span></h2>{section.customers.map(c => <button className="customer-row" onClick={() => updateListState({ customerId: c.customer_id, warehouseId: section.warehouse.id })} key={c.customer_id}><i className="bi bi-person-circle"/><span><b>{c.customer_name}</b><small>{c.order_count} đơn</small></span>{c.has_urgent && <mark>GẤP</mark>}<i className="bi bi-chevron-right"/></button>)}</div>)}</div>}
       {selected && <OrderDrawer {...selected} tab={tab as QueueTab} onClose={() => updateListState({ customerId: null, warehouseId: null })} onBeginPicking={beginPicking}/>}
     </>}
   </section>
@@ -416,7 +418,7 @@ function OrderDrawer({ customerId, warehouseId, tab, onClose, onBeginPicking }: 
 
 function CreateOrder({ onCreated }: { onCreated: () => void }) {
   const qc = useQueryClient()
-  const customers = useQuery({ queryKey: ['customers', 'create'], queryFn: () => api<Customer[]>('/customers', { query: { sort: 'name_asc' } }).then(r => r.data) })
+  const customers = useQuery({ queryKey: ['customers', 'create'], queryFn: () => api<CustomerLookup[]>('/customers/lookup').then(r => r.data) })
   const [customerId, setCustomerId] = useState(''); const [mode, setMode] = useState('TAN_XUAN'); const [delivery, setDelivery] = useState(''); const [urgent, setUrgent] = useState(false); const [note, setNote] = useState('')
   const [uploads, setUploads] = useState<PendingOrderImage[]>([]); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
   const [multiMode, setMultiMode] = useState(false)
@@ -605,6 +607,7 @@ function CreateOrder({ onCreated }: { onCreated: () => void }) {
 type CustomerListSummary = { total_debt_amount: number; count: number }
 
 function Customers() {
+  const { user } = useAuth()
   const qc = useQueryClient()
   const [q, setQ] = useState('')
   const [sort, setSort] = useState('debt_desc')
@@ -612,8 +615,10 @@ function Customers() {
   const [phone, setPhone] = useState('')
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
+  const canView = Boolean(user?.permissions?.includes('customer_debt.view'))
   const customers = useQuery({
     queryKey: ['customers', q, sort],
+    enabled: canView,
     queryFn: async () => {
       const response = await api<Customer[]>('/customers', { query: { q, sort } })
       const summary: CustomerListSummary = response.meta
@@ -622,8 +627,10 @@ function Customers() {
   })
   const todayDebtChanges = useQuery({
     queryKey: ['customer-debt-changes-today'],
+    enabled: canView,
     queryFn: () => api<CustomerDebtChange[]>('/customers/debt-changes/today').then(response => response.data),
   })
+  if (!canView) return <section className="page"><Problem text="Bạn không có quyền xem khách hàng / công nợ."/></section>
   const rows = customers.data?.rows ?? []
   const summary = customers.data?.summary
   const customersWithDebt = rows.filter(customer => customer.debt_amount > 0).length
@@ -830,19 +837,19 @@ function CustomerDetail({ customerId, onClose }: { customerId: string; onClose: 
     <div className="money-grid debt-summary"><span>Đầu kỳ <b>{formatMoney(debt.data!.opening)}</b></span><span>Phát sinh tăng <b>{formatMoney(debt.data!.debit)}</b></span><span>Phát sinh giảm <b>{formatMoney(debt.data!.credit)}</b></span><span>Cuối kỳ <b>{formatMoney(debt.data!.closing)}</b></span></div>
 
     {canAdjust && <div className="card debt-adjust">
-      {!showForm ? <button className="btn-main" onClick={() => { setShowForm(true); setError('') }}>＋/－ Tạo phiếu công nợ</button> : <div className="debt-adjust-form">
+      {!showForm ? <button className="btn-main" onClick={() => { setShowForm(true); setError('') }}>+/- Tạo phiếu công nợ</button> : <div className="debt-adjust-form">
         <div className="debt-adjust-title">TẠO PHIẾU CÔNG NỢ</div>
         <div className="debt-adjust-help">Một phiếu có thể vừa cộng tiền mua nợ, vừa trừ tiền khách trả.</div>
         <div className="debt-adjust-grid">
-          <label>Loại<select className="form-control" value={type} onChange={e => setType(e.target.value as 'INCREASE' | 'DECREASE')}><option value="INCREASE">＋ Mua nợ / Cộng thêm</option><option value="DECREASE">－ Trừ tiền</option></select></label>
+          <label>Loại<select className="form-control" value={type} onChange={e => setType(e.target.value as 'INCREASE' | 'DECREASE')}><option value="INCREASE">+ Mua nợ / Cộng thêm</option><option value="DECREASE">- Trừ tiền</option></select></label>
           <label>Ngày<input className="form-control" type="date" value={date} onChange={e => setDate(e.target.value)}/></label>
           <label>Số tiền<input className="form-control" inputMode="numeric" placeholder="0" value={amount} onChange={e => setAmount(e.target.value)}/></label>
         </div>
         <label>Ghi chú<input className="form-control" placeholder="VD: Khách lấy thêm hàng, khách CK, trừ hàng lỗi..." value={note} onChange={e => setNote(e.target.value)}/></label>
-        <button className="btn-outline" onClick={addLine}>＋ Thêm vào phiếu</button>
+        <button className="btn-outline" onClick={addLine}>+ Thêm vào phiếu</button>
         {draft.length > 0 && <div className="debt-adjust-draft">
           <b>Phiếu đang tạo:</b>
-          {draft.map((l, i) => <div className="debt-draft-line" key={l.key}><span>{i + 1}. {l.type === 'INCREASE' ? '＋ Cộng thêm' : '－ Trừ tiền'} · {formatDate(l.date)} · {formatMoney(l.amount)}{l.note ? ` · ${l.note}` : ''}</span><button className="line-remove" onClick={() => removeLine(l.key)}>×</button></div>)}
+          {draft.map((l, i) => <div className="debt-draft-line" key={l.key}><span>{i + 1}. {l.type === 'INCREASE' ? '+ Cộng thêm' : '- Trừ tiền'} · {formatDate(l.date)} · {formatMoney(l.amount)}{l.note ? ` · ${l.note}` : ''}</span><button className="line-remove" onClick={() => removeLine(l.key)}>×</button></div>)}
           <div className="debt-draft-total"><span>Tạm tính thay đổi: <b>{totalChange > 0 ? '+' : ''}{formatMoney(totalChange)}</b></span><span>Nợ sau khi lưu: <b>{formatMoney(projectedDebt)}</b></span></div>
         </div>}
         <button className="btn-main" disabled={busy} onClick={saveSlip}>{busy ? 'ĐANG LƯU…' : '💾 Lưu TT'}</button>

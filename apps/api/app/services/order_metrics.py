@@ -29,16 +29,36 @@ DEBT_STATUSES = ("DEBT_ORDER",)
 INVOICE_SENT_STATUSES = ("SENT", "PAID", "PARTIALLY_PAID")
 INVOICE_PENDING_BILLING = ("DRAFT", "READY")
 
+# Status chuẩn cho từng bucket workflow — dùng chung giữa Python (classify_order)
+# và SQL (queue filter) để hai nơi không bao giờ lệch nhau.
+NEW_STATUS = "NEW"
+PICKING_STATUS = "PICKING"
+
 _BUCKETS = ("new", "picking", "picked", "debt", "cancelled", "unclassified")
+
+
+def bucket_statuses(bucket: str) -> tuple[str, ...]:
+    """Trả về các status thuộc một workflow bucket (dùng chung cho Python + SQL)."""
+    if bucket == "new":
+        return (NEW_STATUS,)
+    if bucket == "picking":
+        return (PICKING_STATUS,)
+    if bucket == "picked":
+        return PICKED_STATUSES
+    if bucket == "debt":
+        return DEBT_STATUSES
+    if bucket == "cancelled":
+        return CANCELLED_STATUSES
+    return ()
 
 
 def classify_order(order: Order) -> str:
     """Phân loại một order vào đúng một bucket workflow (không double count)."""
     if order.billing_status == "DELETED" or order.status in CANCELLED_STATUSES:
         return "cancelled"
-    if order.status == "NEW":
+    if order.status == NEW_STATUS:
         return "new"
-    if order.status == "PICKING":
+    if order.status == PICKING_STATUS:
         return "picking"
     if order.status in PICKED_STATUSES:
         return "picked"

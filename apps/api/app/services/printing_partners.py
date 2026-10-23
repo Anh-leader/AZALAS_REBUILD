@@ -110,7 +110,7 @@ def settle_month(db: Session, *, partner_key: str, period_month: str, amount: in
         raise ApiError(422, "MEDIA_NOT_FOUND", "File đối chiếu không tồn tại.")
     if media and media.content_type != "application/pdf":
         raise ApiError(422, "MEDIA_TYPE_INVALID", "File đối chiếu phải là PDF.")
-    if media and not media.object_key.startswith(f"private-media/{config.code}/"):
+    if media and f"/{config.code}/" not in media.object_key:
         raise ApiError(422, "MEDIA_PARTNER_INVALID", "File PDF không thuộc đúng sổ đối tác.")
 
     settlement = PartnerSettlement(

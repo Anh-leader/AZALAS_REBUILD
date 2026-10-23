@@ -242,7 +242,8 @@ export function InvoiceDetailPage() {
   const captureReady = data.capture_status === 'READY'
   const captureStale = data.capture_status === 'STALE'
   const paymentTotal = (data.payments ?? []).reduce((sum, p) => sum + (p.amount || 0), 0)
-  const remaining = Math.max(data.amount_due_before_payment - paymentTotal, 0)
+  const receivedAmount = data.received_amount ?? paymentTotal
+  const remaining = data.remaining_receivable ?? Math.max((data.total_debt_amount ?? data.debt_after_before_payment) - receivedAmount, 0)
 
   const orderNumbers = data.orders.map(order => order.order_no).join(' · ')
   const hasNotes = data.orders.some(o => o.customer_note)
@@ -300,7 +301,7 @@ export function InvoiceDetailPage() {
         {edit
           ? <div className="bill-total-line bill-total-edit"><span>NỢ CŨ</span><input className="edit-gia" type="number" value={edit.oldDebt} onChange={e => setEdit({ ...edit, oldDebt: e.target.value })}/></div>
           : <div className="bill-total-line"><span>NỢ CŨ</span><b>{formatMoney(data.debt_before_amount)}</b></div>}
-        <div className="bill-total-line bill-total-emphasis"><span>TỔNG NỢ</span><b>{formatMoney(data.debt_after_before_payment)}</b></div>
+        <div className="bill-total-line bill-total-emphasis"><span>TỔNG NỢ</span><b>{formatMoney(data.total_debt_amount ?? data.debt_after_before_payment)}</b></div>
         <div className="bill-total-line bill-total-final"><span>CÒN LẠI PHẢI THU</span><b>{formatMoney(remaining)}</b></div>
       </div>
 
@@ -333,7 +334,7 @@ export function InvoiceDetailPage() {
           : data.payments?.length
             ? <div className="bill-payments-list">{data.payments.map((p, i) => <div className="bill-payment" key={i}><span>{p.method}</span><span>{formatMoney(p.amount)}</span><small>{p.note}</small></div>)}</div>
             : <p className="muted">Chưa có phiếu thu</p>}
-        <div className="bill-payment-foot"><span>Tiền nhận: {formatMoney(paymentTotal)}</span><b>Còn lại: {formatMoney(remaining)}</b></div>
+        <div className="bill-payment-foot"><span>Tiền nhận: {formatMoney(receivedAmount)}</span><b>Còn lại: {formatMoney(remaining)}</b></div>
       </div>
 
       {edit && <div className="bill-edit-extras">

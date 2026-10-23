@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, STATUS_LABEL, tokenStore, type Customer, type Invoice, type InvoicePreview, type Order, type ProductVariant, type ReturnRecord, type Warehouse } from '../api/client'
+import { api, apiUrl, ApiError, STATUS_LABEL, tokenStore, type CustomerLookup, type Invoice, type InvoicePreview, type Order, type ProductVariant, type ReturnRecord, type Warehouse } from '../api/client'
 import { formatDate, formatMoney } from '../lib/format'
 
 const errorMessage = (error: unknown) => error instanceof ApiError ? error.message : 'Không thể kết nối máy chủ.'
@@ -76,7 +76,7 @@ export function InvoicePage() {
   async function printInvoice(invoice: Invoice) {
     setError('')
     try {
-      const response = await fetch(`/api/v1/invoices/${invoice.id}/print`, { headers: { Authorization: `Bearer ${tokenStore.get()}` } })
+      const response = await fetch(apiUrl(`/api/v1/invoices/${invoice.id}/print`), { headers: { Authorization: `Bearer ${tokenStore.get()}` } })
       if (!response.ok) throw new Error()
       const blobUrl = URL.createObjectURL(await response.blob()); window.open(blobUrl, '_blank', 'noopener,noreferrer')
       setTimeout(() => URL.revokeObjectURL(blobUrl), 60000)
@@ -94,7 +94,7 @@ export function InvoicePage() {
           {preview.available_returns.length > 0 && <div className="return-credit-list"><b>Hàng trả khả dụng</b>{preview.available_returns.map(row => <label key={row.id}><input type="checkbox" checked={returnIds.includes(row.id)} onChange={e => { setReturnIds(current => e.target.checked ? [...current, row.id] : current.filter(id => id !== row.id)); setPreview(null) }}/>{row.return_no} · {formatMoney(row.amount)}</label>)}</div>}
           <h3>Thanh toán</h3>{payments.map((row, index) => <div className="payment-line" key={row.key}><select className="form-control" value={row.method} onChange={e => setPayments(current => current.map(x => x.key === row.key ? { ...x, method: e.target.value as PayLine['method'] } : x))}><option value="CASH">Tiền mặt</option><option value="BANK_TRANSFER">Chuyển khoản</option><option value="OTHER">Khác</option></select><input className="form-control" type="number" min="0" placeholder="Số tiền" value={row.amount} onChange={e => setPayments(current => current.map(x => x.key === row.key ? { ...x, amount: e.target.value } : x))}/>{index > 0 && <button className="line-remove" onClick={() => setPayments(current => current.filter(x => x.key !== row.key))}>×</button>}</div>)}
           <button className="btn-outline" onClick={() => setPayments(current => [...current, { key: crypto.randomUUID(), method: 'CASH', amount: '', note: '' }])}>+ Thêm dòng thanh toán</button>
-          <div className="invoice-total"><span>Tiền nhận: {formatMoney(paymentTotal)}</span><b>Còn lại: {formatMoney(Math.max(preview.amount_due_before_payment - paymentTotal, 0))}</b></div>
+          <div className="invoice-total"><span>Tiền nhận: {formatMoney(paymentTotal)}</span><b>Còn lại: {formatMoney(Math.max(preview.debt_after_before_payment - paymentTotal, 0))}</b></div>
           <textarea className="form-control" placeholder="Ghi chú hóa đơn" value={note} onChange={e => setNote(e.target.value)}/><button className="btn-main" disabled={busy} onClick={closeInvoice}>{busy ? 'ĐANG CHỐT…' : 'CHỐT & GỬI ĐƠN'}</button>
         </div>}</>}
       </div></div>
@@ -108,7 +108,7 @@ const emptyLine = (): DraftReturnLine => ({ key: crypto.randomUUID(), product_va
 export function ReturnsPage() {
   const qc = useQueryClient(); const [tab, setTab] = useState('NEW_FORM'); const [customerId, setCustomerId] = useState(''); const [warehouseId, setWarehouseId] = useState('')
   const [lines, setLines] = useState<DraftReturnLine[]>([emptyLine()]); const [note, setNote] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState('')
-  const customers = useQuery({ queryKey: ['customers', 'returns'], queryFn: () => api<Customer[]>('/customers', { query: { sort: 'name_asc' } }).then(r => r.data) })
+  const customers = useQuery({ queryKey: ['customers', 'returns'], queryFn: () => api<CustomerLookup[]>('/customers/lookup').then(r => r.data) })
   const warehouses = useQuery({ queryKey: ['warehouses'], queryFn: () => api<Warehouse[]>('/warehouses').then(r => r.data) })
   const variants = useQuery({ queryKey: ['variants', warehouseId], enabled: !!warehouseId, queryFn: () => api<ProductVariant[]>('/product-variants', { query: { warehouse_id: warehouseId } }).then(r => r.data) })
   const returns = useQuery({ queryKey: ['returns'], queryFn: () => api<ReturnRecord[]>('/returns').then(r => r.data) })

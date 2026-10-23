@@ -1,4 +1,4 @@
-﻿import { useState } from 'react'
+import { useState } from 'react'
 import { ZipperPage } from './ZipperPage'
 import { EmbroideryPage } from './EmbroideryPage'
 import { PrintingPartnerPage, type PrintingPartnerKey } from './PrintingPartnerPage'

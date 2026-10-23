@@ -155,6 +155,65 @@ def test_create_order_both_and_idempotent(client, owner, db):
     assert db.query(Order).filter(Order.idempotency_key == headers["Idempotency-Key"]).count() == 2
 
 
+def test_create_order_resolves_warehouse_by_name_when_code_differs(client, owner, db):
+    """Regression: production warehouses use code TX/CK (not TAN_XUAN/CA_KOI).
+
+    The backend must resolve `warehouse_mode` by the stable warehouse name, so a
+    warehouse with a non-matching `code` is still found and the created order
+    carries the real warehouse id (not a display name or mode string).
+    """
+    tx = db.scalar(select(Warehouse).where(Warehouse.name == "Tân Xuân"))
+    ck = db.scalar(select(Warehouse).where(Warehouse.name == "Cá Koi"))
+    assert tx is not None and ck is not None
+    tx.code = "TX"
+    ck.code = "CK"
+    db.commit()
+
+    headers = {"Idempotency-Key": str(uuid.uuid4())}
+
+    # Cá Koi -> warehouse Cá Koi (code CK)
+    r = client.post("/api/v1/orders", json={
+        "customer_id": _customer_id(db), "warehouse_mode": "CA_KOI",
+        "created_date": date.today().isoformat(),
+    }, headers=owner | headers)
+    assert r.status_code == 201, r.text
+    order = r.json()["data"][0]
+    assert order["warehouse"]["code"] == "CK"
+    assert order["warehouse"]["id"] == str(ck.id)
+
+    # Tân Xuân -> warehouse Tân Xuân (code TX)
+    r = client.post("/api/v1/orders", json={
+        "customer_id": _customer_id(db), "warehouse_mode": "TAN_XUAN",
+        "created_date": date.today().isoformat(),
+    }, headers=owner | {"Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 201, r.text
+    order = r.json()["data"][0]
+    assert order["warehouse"]["code"] == "TX"
+    assert order["warehouse"]["id"] == str(tx.id)
+
+    # BOTH -> cả hai kho (code TX + CK)
+    r = client.post("/api/v1/orders", json={
+        "customer_id": _customer_id(db), "warehouse_mode": "BOTH",
+        "created_date": date.today().isoformat(),
+    }, headers=owner | {"Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 201, r.text
+    codes = {o["warehouse"]["code"] for o in r.json()["data"]}
+    assert codes == {"TX", "CK"}
+
+
+def test_create_order_missing_warehouse_returns_422(client, owner, db):
+    """Khi kho không tồn tại (theo name) backend trả 422 rõ ràng."""
+    ck = db.scalar(select(Warehouse).where(Warehouse.name == "Cá Koi"))
+    ck.name = "Đã đổi tên"
+    db.commit()
+    r = client.post("/api/v1/orders", json={
+        "customer_id": _customer_id(db), "warehouse_mode": "CA_KOI",
+        "created_date": date.today().isoformat(),
+    }, headers=owner | {"Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "WAREHOUSE_NOT_FOUND"
+
+
 def test_create_order_validation(client, owner, db):
     body = {"customer_id": str(uuid.uuid4()), "warehouse_mode": "TAN_XUAN", "created_date": "2026-10-08"}
     r = client.post("/api/v1/orders", json=body, headers=owner)

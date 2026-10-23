@@ -11,7 +11,9 @@ export function useAuthenticatedMedia(url: string): MediaSource {
     let objectUrl: string | null = null
     setState({ source: null, failed: false })
 
-    const load = url.startsWith('blob:')
+    // Absolute signed/public URLs (e.g. R2) are rendered directly by the browser
+    // via <img src>; no authenticated fetch, no blob, no CORS-sensitive request.
+    const load = url.startsWith('blob:') || /^https?:\/\//i.test(url)
       ? Promise.resolve(url)
       : authenticatedMediaFetch(url).then(async response => URL.createObjectURL(await response.blob()))
 

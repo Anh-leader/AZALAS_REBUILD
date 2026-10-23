@@ -48,7 +48,9 @@ def test_settle_with_pdf(client, owner, db):
     assert settlement.media_id == uuid.UUID(media_id)
     # Không lưu base64 trong DB.
     media_row = db.get(MediaObject, uuid.UUID(media_id))
-    assert media_row.object_key.startswith("private-media/NHAT_IN/")
+    assert media_row.object_key.startswith("partners/")
+    assert "/NHAT_IN/" in media_row.object_key
+    assert media_row.object_key.endswith(".pdf")
 
 
 def test_upload_nhat_in_rejects_non_pdf(client, owner):

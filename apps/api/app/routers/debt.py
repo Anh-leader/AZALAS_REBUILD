@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.db import get_db
-from ..core.deps import current_user, require_accounting
+from ..core.deps import current_user, require_accounting, require_permission
 from ..core.errors import ApiError
 from ..models import AuditLog, Customer, DebtLedgerEntry, PartyDebtBalance, User
 from ..services.finance import debt_total, refresh_debt_projection
@@ -43,17 +43,17 @@ def _ledger(db: Session, customer_id: uuid.UUID) -> dict:
 
 
 @router.get("/customers/{customer_id}/debt-ledger")
-def customer_ledger(customer_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(current_user)):
+def customer_ledger(customer_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_permission("customer_debt.view"))):
     return {"data": _ledger(db, customer_id)}
 
 
 @router.get("/debt/customers/{customer_id}")
-def customer_debt(customer_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(current_user)):
+def customer_debt(customer_id: uuid.UUID, db: Session = Depends(get_db), _=Depends(require_permission("customer_debt.view"))):
     return {"data": _ledger(db, customer_id)}
 
 
 @router.get("/debt/summary")
-def summary(db: Session = Depends(get_db), _=Depends(current_user)):
+def summary(db: Session = Depends(get_db), _=Depends(require_permission("customer_debt.view"))):
     rows = db.execute(select(
         DebtLedgerEntry.party_id, func.sum(DebtLedgerEntry.amount_delta)
     ).where(DebtLedgerEntry.party_type == "CUSTOMER").group_by(DebtLedgerEntry.party_id)).all()

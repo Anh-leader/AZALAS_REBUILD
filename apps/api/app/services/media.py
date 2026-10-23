@@ -6,6 +6,9 @@ bỏ đơn đã xóa, gom theo ngày ``dd/MM/yyyy``. Trong hệ mới nguồn l�
 ``media_objects`` liên kết qua ``order_media`` tới ``orders``.
 """
 
+import io
+import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -16,7 +19,12 @@ from sqlalchemy.orm import Session, aliased
 from ..core.errors import ApiError
 from ..core.text import fold
 from ..models import Customer, Invoice, InvoiceOrder, MediaObject, Order, OrderGroup, OrderMedia, User
-from .storage import media_view_url
+from .storage import (
+    get_storage_service,
+    media_thumbnail_url,
+    media_view_url,
+    thumbnail_object_key,
+)
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
@@ -122,13 +130,19 @@ def customer_order_gallery(
     q: str | None = None,
     date_filter: date | None = None,
     status: str | None = None,
-    limit: int = 500,
-    offset: int = 0,
+    page: int = 1,
+    page_size: int = 40,
 ) -> tuple[list[dict], dict]:
-    """Return persisted customer-order images grouped once per order/group."""
+    """Return persisted customer-order images grouped once per order/group.
+
+    Paginated at the card level: the number of database queries is fixed (one
+    media/order fetch ordered in SQL plus one batched invoice lookup) and never
+    scales with the number of images returned.
+    """
     days = max(1, min(int(days), 365))
-    limit = max(1, min(int(limit), 1000))
-    offset = max(0, int(offset))
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), 100))
+    offset = (page - 1) * page_size
     today = datetime.now(TZ).date()
     cutoff = today - timedelta(days=days)
     if status and status not in set(GALLERY_STATUS_BY_ORDER_STATUS.values()):
@@ -137,7 +151,31 @@ def customer_order_gallery(
     creator = aliased(User)
     uploader = aliased(User)
     stmt = (
-        select(MediaObject, Order, Customer, OrderGroup, creator.display_name, uploader.display_name)
+        select(
+            MediaObject.id,
+            MediaObject.original_name,
+            MediaObject.content_type,
+            MediaObject.created_at,
+            MediaObject.storage_provider,
+            MediaObject.storage,
+            MediaObject.bucket,
+            MediaObject.object_key,
+            Order.id,
+            Order.order_no,
+            Order.order_group_id,
+            Order.created_date,
+            Order.created_at,
+            Order.customer_note,
+            Order.status,
+            Customer.id,
+            Customer.name,
+            Customer.customer_code,
+            OrderGroup.group_no,
+            OrderGroup.created_at,
+            creator.display_name,
+            uploader.display_name,
+        )
+        .select_from(MediaObject)
         .join(OrderMedia, OrderMedia.media_id == MediaObject.id)
         .join(Order, Order.id == OrderMedia.order_id)
         .join(Customer, Customer.id == Order.customer_id)
@@ -150,48 +188,96 @@ def customer_order_gallery(
             Order.created_date >= cutoff,
             Order.created_date <= today,
         )
+        .order_by(
+            Order.created_at.desc() if sort == "created_desc" else Order.created_at.asc(),
+            Order.order_no.asc(),
+        )
     )
     if date_filter:
         stmt = stmt.where(Order.created_date == date_filter)
 
+    # Reuse one storage client per provider for fast batched presigned URLs
+    # (boto3 client construction is the expensive part; presign is local).
+    storage_services: dict[str, object] = {}
+
+    def _storage(provider: str):
+        provider = provider or "local"
+        svc = storage_services.get(provider)
+        if svc is None:
+            svc = get_storage_service(provider)
+            storage_services[provider] = svc
+        return svc
+
     grouped: dict[tuple[str, str], dict] = {}
-    for media, order, customer, order_group, creator_name, uploader_name in db.execute(stmt).all():
-        group_key = ("group", str(order.order_group_id)) if order.order_group_id else ("order", str(order.id))
-        order_date = order.created_date
+    for row in db.execute(stmt).all():
+        (
+            media_id,
+            original_name,
+            content_type,
+            media_created_at,
+            storage_provider,
+            legacy_storage,
+            bucket,
+            object_key,
+            order_id,
+            order_no,
+            order_group_id,
+            order_created_date,
+            order_created_at,
+            customer_note,
+            order_status,
+            customer_id,
+            customer_name,
+            customer_code,
+            group_no,
+            order_group_created_at,
+            creator_name,
+            uploader_name,
+        ) = row
+        group_key = ("group", str(order_group_id)) if order_group_id else ("order", str(order_id))
         card = grouped.get(group_key)
         if card is None:
             card = {
-                "group_id": str(order.order_group_id or order.id),
-                "customer_id": str(customer.id),
-                "customer_name": customer.name,
-                "customer_code": customer.customer_code,
-                "group_no": order_group.group_no if order_group else None,
-                "date": order_date,
-                "created_at": order_group.created_at if order_group else order.created_at,
+                "group_id": str(order_group_id or order_id),
+                "customer_id": str(customer_id),
+                "customer_name": customer_name,
+                "customer_code": customer_code,
+                "group_no": group_no,
+                "date": order_created_date,
+                "created_at": order_group_created_at if order_group_id else order_created_at,
                 "notes": set(),
                 "creators": set(),
                 "orders": {},
                 "images": {},
             }
             grouped[group_key] = card
-        if order_date > card["date"]:
-            card["date"] = order_date
-        if order.customer_note:
-            card["notes"].add(order.customer_note)
+        if order_created_date > card["date"]:
+            card["date"] = order_created_date
+        if customer_note:
+            card["notes"].add(customer_note)
         if creator_name:
             card["creators"].add(creator_name)
-        card["orders"][str(order.id)] = {
-            "id": str(order.id),
-            "order_no": order.order_no,
-            "status": order.status,
-            "created_at": order.created_at,
+        card["orders"][str(order_id)] = {
+            "id": str(order_id),
+            "order_no": order_no,
+            "status": order_status,
+            "created_at": order_created_at,
         }
-        card["images"].setdefault(str(media.id), {
-            "id": str(media.id),
-            "url": media_view_url(media.id),
-            "view_url": media_view_url(media.id),
-            "original_name": media.original_name,
-            "created_at": media.created_at.isoformat() if media.created_at else None,
+        # Defer presigning: store the raw storage metadata now and sign only the
+        # images that actually land on the current page (presign is per-object and
+        # was the dominant cost when done for every media in the 10-day window).
+        card["images"].setdefault(str(media_id), {
+            "id": str(media_id),
+            "url": media_view_url(media_id),
+            "view_url": None,
+            "thumbnail_url": None,
+            "_storage_provider": storage_provider,
+            "_legacy_storage": legacy_storage,
+            "_bucket": bucket,
+            "_object_key": object_key,
+            "original_name": original_name,
+            "content_type": content_type,
+            "created_at": media_created_at.isoformat() if media_created_at else None,
             "uploaded_by_name": uploader_name,
         })
 
@@ -281,9 +367,29 @@ def customer_order_gallery(
         "total_images": sum(card["image_count"] for card in cards),
     }
     total = len(cards)
-    page = cards[offset:offset + limit]
+    page_cards = cards[offset:offset + page_size]
+
+    # Presign only the current page's images (thumbnail + full-size), leaving the
+    # original object untouched and avoiding hundreds of discarded signed URLs.
+    for card in page_cards:
+        for img in card["images"]:
+            provider = (img.pop("_storage_provider") or "").lower()
+            legacy_storage = img.pop("_legacy_storage")
+            bucket = img.pop("_bucket")
+            object_key = img.pop("_object_key")
+            if provider == "s3" or (not provider and legacy_storage == "S3"):
+                provider = "s3"
+            storage = _storage(provider)
+            signer = getattr(storage, "signed_url", None)
+            if signer is None:
+                img["view_url"] = img["url"]
+                img["thumbnail_url"] = media_thumbnail_url(img["id"])
+            else:
+                img["view_url"] = signer(bucket=bucket, object_key=object_key)
+                img["thumbnail_url"] = signer(bucket=bucket, object_key=thumbnail_object_key(object_key))
+
     by_date: dict[str, list[dict]] = {}
-    for card in page:
+    for card in page_cards:
         by_date.setdefault(card["order_date"], []).append(card)
     data = [
         {
@@ -293,10 +399,103 @@ def customer_order_gallery(
         }
         for date_iso, orders in by_date.items()
     ]
+    has_more = offset + page_size < total
     return data, {
         "summary": summary,
         "total": total,
-        "limit": limit,
-        "offset": offset,
-        "next_offset": offset + limit if offset + limit < total else None,
+        "page": page,
+        "page_size": page_size,
+        "has_more": has_more,
+        "next_page": page + 1 if has_more else None,
     }
+
+
+# --- Thumbnail rendering ----------------------------------------------------
+#
+# Thumbnails are stored as a derived R2 object ``<original>.thumb.webp`` with an
+# immutable Cache-Control header. The first request generates and persists the
+# thumbnail; every later request (any user/device) is served by R2/CDN directly,
+# with no backend resize and no full-object download.
+_THUMB_CACHE: dict[tuple[str, int], tuple[float, bytes]] = {}
+_THUMB_LOCK = threading.Lock()
+_THUMB_TTL_SECONDS = 15 * 60
+_THUMB_MAX_ENTRIES = 256
+THUMB_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+def resize_to_webp(data: bytes, *, max_width: int = 400) -> tuple[bytes, str] | None:
+    """Resize raw image bytes to a WebP thumbnail. Returns None for non-images."""
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - dependency is declared
+        return None
+
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception:  # noqa: BLE001 - corrupt/unreadable or non-image bytes
+        return None
+
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+    image.thumbnail((max_width, max_width))
+    buffer = io.BytesIO()
+    image.save(buffer, format="WEBP", quality=80, method=4)
+    return buffer.getvalue(), "image/webp"
+
+
+def ensure_thumbnail_object(media: MediaObject, *, max_width: int = 400) -> bytes | None:
+    """Generate + persist a thumbnail object if it does not exist, return bytes.
+
+    Returns the cached thumbnail bytes on success, or None if the media is not a
+    supported image (e.g. PDF). The original object is never modified.
+    """
+    if not (media.content_type or "").startswith("image/"):
+        return None
+
+    provider = (media.storage_provider or "").lower()
+    if provider == "s3" or (not provider and media.storage == "S3"):
+        provider = "s3"
+    thumb_key = thumbnail_object_key(media.object_key)
+
+    storage = get_storage_service(provider or "local")
+    if provider == "r2":
+        # If the immutable thumbnail object already exists, reuse it.
+        if storage.exists(bucket=media.bucket, object_key=thumb_key):
+            with _THUMB_LOCK:
+                cached = _THUMB_CACHE.get((str(media.id), max_width))
+            return cached[1] if cached else None
+
+        data = storage.read(bucket=media.bucket, object_key=media.object_key)
+        resized = resize_to_webp(data, max_width=max_width)
+        if resized is None:
+            return None
+        payload, mime = resized
+        storage.put(object_key=thumb_key, data=payload, content_type=mime, cache_control=THUMB_CACHE_CONTROL)
+        with _THUMB_LOCK:
+            if len(_THUMB_CACHE) >= _THUMB_MAX_ENTRIES:
+                _THUMB_CACHE.clear()
+            _THUMB_CACHE[(str(media.id), max_width)] = (time.monotonic(), payload)
+        return payload
+
+    # Local/legacy: no persisted thumbnail object; serve from memory only.
+    data = storage.read(bucket=media.bucket, object_key=media.object_key)
+    return (resize_to_webp(data, max_width=max_width) or (None,))[0]
+
+
+def media_thumbnail_bytes(media: MediaObject, *, max_width: int = 400) -> tuple[bytes, str]:
+    """Return (bytes, content_type) for a resized thumbnail of an image."""
+    if not (media.content_type or "").startswith("image/"):
+        raise ApiError(415, "NOT_AN_IMAGE", "Không thể tạo thumbnail cho file không phải ảnh.")
+
+    max_width = max(80, min(int(max_width), 1200))
+    key = (str(media.id), max_width)
+    with _THUMB_LOCK:
+        cached = _THUMB_CACHE.get(key)
+        if cached is not None and time.monotonic() - cached[0] < _THUMB_TTL_SECONDS:
+            return cached[1], "image/webp"
+
+    payload = ensure_thumbnail_object(media, max_width=max_width)
+    if payload is None:
+        raise ApiError(415, "UNSUPPORTED_IMAGE", "Không thể đọc ảnh để tạo thumbnail.")
+    return payload, "image/webp"

@@ -1,4 +1,4 @@
-import { api, tokenStore } from './client'
+import { api, tokenStore, apiUrl} from './client'
 
 export type UploadedMedia = { id: string; view_url: string; url: string; content_type: string }
 
@@ -18,12 +18,13 @@ export async function authenticatedMediaFetch(url: string): Promise<Response> {
     const headers = new Headers()
     const token = tokenStore.get()
     if (token) headers.set('Authorization', `Bearer ${token}`)
-    return fetch(url, { headers })
+    const targetUrl = /^https?:\/\//i.test(url) ? url : apiUrl(url)
+return fetch(targetUrl, { headers })
   }
 
   let response = await request()
   if (response.status === 401 && tokenStore.getRefresh()) {
-    const refreshed = await fetch('/api/v1/auth/refresh', {
+    const refreshed = await fetch(apiUrl('/api/v1/auth/refresh'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: tokenStore.getRefresh() }),
@@ -47,6 +48,12 @@ export async function authenticatedMediaFetch(url: string): Promise<Response> {
 }
 
 export async function openAuthenticatedMedia(url: string): Promise<void> {
+  // Direct signed/public URL: open it straight in a new tab, no fetch/blob.
+  if (/^https?:\/\//i.test(url)) {
+    const win = window.open(url, '_blank', 'noopener,noreferrer')
+    if (!win) throw new Error('Popup was blocked')
+    return
+  }
   const popup = window.open('about:blank', '_blank')
   if (!popup) throw new Error('Popup was blocked')
   popup.opener = null
@@ -62,6 +69,13 @@ export async function openAuthenticatedMedia(url: string): Promise<void> {
 }
 
 export async function downloadAuthenticatedMedia(url: string, filename: string): Promise<void> {
+  // Direct signed/public URL: cross-origin `download` won't force a save, so
+  // open in a new tab (the browser renders the image; the user can save).
+  if (/^https?:\/\//i.test(url)) {
+    const win = window.open(url, '_blank', 'noopener,noreferrer')
+    if (!win) throw new Error('Popup was blocked')
+    return
+  }
   const response = await authenticatedMediaFetch(url)
   const objectUrl = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
